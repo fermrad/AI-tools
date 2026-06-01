@@ -1,0 +1,72 @@
+name: Report CI Failure as Issue
+
+on:
+  workflow_call:
+    inputs:
+      job_name:
+        description: "Name of the job that failed (e.g. 'build', 'test', 'deploy')"
+        required: true
+        type: string
+      workflow_url:
+        description: "Link to the failed workflow run"
+        required: true
+        type: string
+      context:
+        description: "Optional additional context (branch, commit, etc.)"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  create-issue:
+    name: Create failure issue
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Create GitHub issue for failure
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const jobName  = '${{ inputs.job_name }}';
+            const runUrl   = '${{ inputs.workflow_url }}';
+            const context  = `${{ inputs.context }}`;
+            const branch   = '${{ github.ref_name }}';
+            const sha      = '${{ github.sha }}'.slice(0, 7);
+            const actor    = '${{ github.actor }}';
+            const title    = `CI failure: ${jobName} on ${branch} (${sha})`;
+
+            // Check for an existing open issue with the same title to avoid duplicates
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'open',
+              labels: 'ci-failure',
+            });
+            const duplicate = existing.data.find(i => i.title === title);
+            if (duplicate) {
+              console.log(`Duplicate issue found: #${duplicate.number} — skipping.`);
+              return;
+            }
+
+            const body = [
+              `## CI failure: \`${jobName}\``,
+              ``,
+              `| Field | Value |`,
+              `|---|---|`,
+              `| Branch | \`${branch}\` |`,
+              `| Commit | \`${sha}\` |`,
+              `| Actor | @${actor} |`,
+              `| Workflow run | [View run](${runUrl}) |`,
+              context ? `| Context | ${context} |` : '',
+            ].filter(Boolean).join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              title,
+              body,
+              labels: ['bug', 'ci-failure'],
+            });
+            console.log(`Issue created: ${title}`);
