@@ -34,17 +34,33 @@ Create a new GitHub repository following the Ferm conventions. Steps:
    ```
    If the project is a monorepo with named apps, also create an app label per app.
 
-6. **Set branch protection on `main`**:
+6. **Set branch protection on `main` and `staging`** (both branches, same settings):
    ```bash
-   gh api repos/<org>/<name>/branches/main/protection \
-     --method PUT \
-     --field required_status_checks='{"strict":true,"contexts":[]}' \
-     --field enforce_admins=false \
-     --field required_pull_request_reviews='{"required_approving_review_count":1}' \
-     --field restrictions=null
+   for branch in main staging; do
+     gh api repos/fermrad/<name>/branches/$branch/protection \
+       --method PUT \
+       --input - <<'JSON'
+   {
+     "required_status_checks": {"strict": true, "contexts": []},
+     "enforce_admins": false,
+     "required_pull_request_reviews": {"required_approving_review_count": 1},
+     "restrictions": null
+   }
+   JSON
+     echo "✓ $branch protected" || true  # staging may not exist yet — non-fatal
+   done
    ```
+   Branch protection is non-negotiable — always apply it. Never skip this step.
 
-7. **Wire up reusable AI workflows** (ask the user which ones they want):
+7. **Wire up reusable AI workflows** — always add docs and error-reporting; ask about others:
+   - **Documentation update** (always) → create `.github/workflows/update-docs.yml` calling `fermrad/AI-tools/.github/workflows/update-docs.yml@main`. This runs on every PR and keeps docs in sync.
+   - **Runtime error reporting** (always) → copy `claude/widget/src/report-error-route.ts` into `src/app/api/report-error/route.ts` and `claude/widget/src/error-reporter.ts` into `src/lib/error-reporter.ts`. Add `GITHUB_ISSUES_TOKEN` and `GITHUB_REPO` to the app's env vars. The route auto-creates GitHub issues for unhandled runtime errors in production/staging.
+   - **CI failure reporting** (always) → add an `on-failure` job to CI that calls `fermrad/AI-tools/.github/workflows/report-failure.yml@main` so any broken build creates a GitHub issue automatically.
+   - Issue triage (ask) → `.github/workflows/ai-issue-triage.yml`
+   - Compliance check (ask) → add compliance job to CI
+   - Pentest (ask) → `.github/workflows/pentest.yml`
+   - PR preview (ask, requires dev server) → `.github/workflows/pr-preview.yml`
+   - Remind the user to add `ANTHROPIC_API_KEY` to the repo's Actions secrets (needed for docs workflow + triage).
    - Issue triage → create `.github/workflows/ai-issue-triage.yml` calling `fermrad/AI-tools/.github/workflows/ai-issue-triage.yml@main`
    - Compliance check → add compliance job to CI calling `fermrad/AI-tools/.github/workflows/compliance-check.yml@main`
    - Pentest → create `.github/workflows/pentest.yml` calling `fermrad/AI-tools/.github/workflows/pentest.yml@main`

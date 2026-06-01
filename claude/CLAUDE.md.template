@@ -1,20 +1,107 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file is read by Claude Code at the start of every session. Fill in all `TODO` sections when setting up a new repo.
 
-## Session Start
+---
 
-- **Always `git pull origin <current-branch>` at the start of every prompt** before reading files or making changes.
+## Session start
 
-## PR Workflow
+1. **`git pull origin <current-branch>`** before reading any files or making any changes.
+2. **Read this file in full** — it overrides Claude Code's default behaviour.
+3. If touching the server or infrastructure: **read `docs/ferm-tech-stack.md`** before doing anything.
 
-- **All changes go through a PR** — never commit directly to `main`. Create a branch, push, open a PR.
-- **Keep PRs small** — split independent changes into separate PRs.
+---
+
+## PR workflow
+
+- **Never commit directly to `main` or `staging`** — always use a feature branch and a PR.
+- **Keep PRs small** — split independent changes into separate PRs; a reviewer should be able to understand each PR in under 5 minutes.
 - **Update the PR description** when pushing additional commits: `gh pr edit <number> --body "..."`.
-- **PR title format**: `type(scope): description` where type is `feat`, `fix`, `refactor`, `ci`, or `docs`.
-- **Target branch**: `main` (or adjust to `staging` if the project uses a staging branch).
+- **PR title format**: `type(scope): description` — type is one of `feat`, `fix`, `refactor`, `ci`, `docs`.
+- **Target branch**: `staging` for normal work; `main` only for hotfixes.
+- **Labels required on every PR**: one app/scope label + one target-branch label.
+- **Branch protection is always on** — both `main` and `staging` require 1 approving review. Never bypass with `--force`.
 
-## Project Structure
+---
+
+## Code quality rules
+
+- **No comments that describe what code does** — only why (hidden constraints, workarounds, non-obvious invariants).
+- **No premature abstractions** — three similar lines is better than an abstraction. Add it only when the fourth case appears.
+- **No error handling for impossible cases** — trust internal code and framework guarantees. Only validate at system boundaries (user input, external APIs).
+- **No backwards-compatibility shims** — if something is unused, delete it.
+- **No features beyond the task** — a bug fix doesn't need surrounding cleanup.
+
+---
+
+## Security rules
+
+- Never introduce SQL injection, XSS, command injection, or path traversal vulnerabilities.
+- Never store secrets in code, env files committed to git, or application logs.
+- Use parameterised queries — never concatenate user input into SQL.
+- Validate input at system boundaries only.
+
+---
+
+## Tool and library usage
+
+**Always read the installed version's documentation before writing code that uses a library or framework you haven't used in this session.**
+
+```bash
+# Check installed version
+cat package.json | grep <library>
+
+# Read installed docs
+cat node_modules/<library>/README.md | head -100
+```
+
+Why: APIs change between versions. For example, `apps/risk` runs Next.js 16 — many Next.js 14 patterns are wrong or deprecated there. Never assume training-data knowledge is correct for the version actually installed.
+
+---
+
+## Infrastructure rules (applies when touching the server or Terraform)
+
+Summary — see `fermrad/AI-tools/claude/rules/infrastructure.md` for the full list.
+
+**Never:**
+- Delete database volumes or run `docker volume rm` on any environment
+- Run `terraform destroy` on production without written approval
+- Commit secrets, tokens, or passwords to any repository
+- Skip `terraform plan` before `terraform apply`
+- Reload Nginx without first validating config with `nginx -t`
+
+**Always before server changes:**
+- Read `docs/ferm-tech-stack.md` in full
+- Check `docker ps` to see what's actually running
+- Test in development or staging before production
+
+---
+
+## Workflow optimisation — check Claude's own docs
+
+Claude Code has features that change frequently. Before starting a complex multi-step task, check whether a newer/faster approach exists:
+
+```bash
+# Read Claude Code's own documentation
+claude --help
+# Or check the docs in the extension / CLI help
+```
+
+Key features to prefer when available:
+- **Parallel tool calls** — make independent tool calls in a single response block, not sequentially.
+- **Agent subagents** — delegate broad search/exploration to an Explore or general-purpose agent rather than doing many sequential reads in the main context.
+- **`/compact`** — compact the conversation when context grows large; it reduces token usage without losing continuity.
+- **Bash batching** — chain related commands with `&&` rather than making separate Bash calls.
+- **Read only what's needed** — use `offset` and `limit` on Read, use `grep` before reading, use `find` before exploring directories.
+
+Token consumption matters — aim to minimise context size without sacrificing accuracy:
+- Read file sections, not entire files when you only need a part.
+- Use `git diff --stat` before `git diff` to decide if the full diff is needed.
+- Prefer a single well-scoped agent over many sequential tool calls in the main context.
+
+---
+
+## Project structure
 
 TODO: describe the folder layout of this project.
 
@@ -22,6 +109,8 @@ TODO: describe the folder layout of this project.
 src/
   ...
 ```
+
+---
 
 ## Commands
 
@@ -41,14 +130,21 @@ npm run typecheck
 npm run lint
 ```
 
-## Architecture Notes
+---
 
-TODO: describe any non-obvious architectural decisions, patterns, or constraints Claude should know about.
+## Architecture notes
 
-## Auth / Security
+TODO: describe any non-obvious architectural decisions, patterns, or constraints.
 
-TODO: describe how auth works in this project — session handling, tokens, middleware, etc.
+---
+
+## Auth / security
+
+TODO: describe how auth works — session handling, tokens, middleware, edge vs server.
+
+---
 
 ## Infrastructure
 
-TODO: describe how the project is deployed and what infrastructure it runs on.
+TODO: describe how this project is deployed and what infrastructure it runs on.
+Server: 178.104.129.75 (Hetzner VPS). Reverse proxy: Nginx (`ferm-crm-nginx` container). SSL: Let's Encrypt / Certbot.

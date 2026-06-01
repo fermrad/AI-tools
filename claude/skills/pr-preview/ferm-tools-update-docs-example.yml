@@ -1,0 +1,15 @@
+# Copy this file to .github/workflows/update-docs.yml in any Ferm repo.
+# Requires: ANTHROPIC_API_KEY in the repo's Actions secrets.
+# Also copy .github/scripts/update-docs.py from fermrad/AI-tools into your repo.
+
+name: Update Documentation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  docs:
+    uses: fermrad/AI-tools/.github/workflows/update-docs.yml@main
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
