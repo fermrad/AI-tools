@@ -1,0 +1,51 @@
+# Copy this file to fermrad/ferm-tools/.github/workflows/pr-preview.yml
+# It wires the ferm-tools repo into the reusable preview workflow in AI-tools.
+#
+# Required GitHub secrets in ferm-tools:
+#   DEV_SSH_HOST  — IP of the ferm-development Hetzner server
+#   DEV_SSH_KEY   — private SSH key for root@<DEV_SSH_HOST>
+
+name: PR Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to deploy"
+        required: true
+        type: string
+
+jobs:
+  preview:
+    uses: fermrad/AI-tools/.github/workflows/pr-preview.yml@main
+    with:
+      pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
+    secrets:
+      DEV_SSH_HOST: ${{ secrets.DEV_SSH_HOST }}
+      DEV_SSH_KEY: ${{ secrets.DEV_SSH_KEY }}
+
+---
+# Copy this file to fermrad/ferm-tools/.github/workflows/pr-preview-cleanup.yml
+
+name: PR Preview Cleanup
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to clean up"
+        required: true
+        type: string
+
+jobs:
+  cleanup:
+    uses: fermrad/AI-tools/.github/workflows/pr-preview-cleanup.yml@main
+    with:
+      pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
+    secrets:
+      DEV_SSH_HOST: ${{ secrets.DEV_SSH_HOST }}
+      DEV_SSH_KEY: ${{ secrets.DEV_SSH_KEY }}
