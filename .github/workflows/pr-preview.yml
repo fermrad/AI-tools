@@ -1,0 +1,185 @@
+name: PR Preview — Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to deploy"
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+    secrets:
+      DEV_SSH_HOST:
+        required: true
+      DEV_SSH_KEY:
+        required: true
+
+jobs:
+  deploy-preview:
+    name: Deploy PR #${{ inputs.pr_number }} to dev
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ inputs.pr_number }}/head
+          fetch-depth: 0
+
+      - name: Detect changed app
+        id: detect
+        run: |
+          CHANGED=$(git diff --name-only origin/staging...HEAD | grep '^apps/' | cut -d/ -f2 | sort -u | head -1)
+          echo "app=${CHANGED:-crm}" >> $GITHUB_OUTPUT
+          echo "Detected app: ${CHANGED:-crm}"
+
+      - name: Set preview vars
+        id: vars
+        run: |
+          PR="${{ inputs.pr_number }}"
+          APP="${{ steps.detect.outputs.app }}"
+          echo "subdomain=pr-${PR}-${APP}" >> $GITHUB_OUTPUT
+          echo "container=ferm-preview-pr${PR}-${APP}" >> $GITHUB_OUTPUT
+          # Port range: 4000 + (PR number mod 500) to avoid collisions
+          PORT=$((4000 + ($PR % 500)))
+          echo "port=${PORT}" >> $GITHUB_OUTPUT
+
+      - name: Deploy to dev server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEV_SSH_HOST }}
+          username: root
+          key: ${{ secrets.DEV_SSH_KEY }}
+          envs: PR_NUMBER,APP,CONTAINER,PORT,REPO,BRANCH
+          script: |
+            set -e
+
+            # Clone or update the repo
+            WORKDIR="/opt/previews/pr-${PR_NUMBER}-${APP}"
+            if [ -d "$WORKDIR" ]; then
+              cd "$WORKDIR" && git fetch origin && git checkout "$BRANCH" && git pull
+            else
+              mkdir -p /opt/previews
+              git clone "https://github.com/${REPO}.git" "$WORKDIR"
+              cd "$WORKDIR" && git checkout "$BRANCH"
+            fi
+
+            # Build and start the container
+            cd "$WORKDIR/apps/${APP}"
+            docker compose -p "preview-pr${PR_NUMBER}-${APP}" build app
+            docker compose -p "preview-pr${PR_NUMBER}-${APP}" up -d app db
+
+            # Wait for health
+            sleep 10
+            docker compose -p "preview-pr${PR_NUMBER}-${APP}" ps
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          APP: ${{ steps.detect.outputs.app }}
+          CONTAINER: ${{ steps.vars.outputs.container }}
+          PORT: ${{ steps.vars.outputs.port }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+
+      - name: Register preview subdomain in Nginx
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEV_SSH_HOST }}
+          username: root
+          key: ${{ secrets.DEV_SSH_KEY }}
+          envs: SUBDOMAIN,APP,PR_NUMBER
+          script: |
+            set -e
+            NGINX_CONF="/opt/previews/nginx-previews.conf"
+            CONTAINER="ferm-preview-pr${PR_NUMBER}-${APP}"
+
+            # Remove any stale block for this PR
+            sed -i "/# PREVIEW pr-${PR_NUMBER}-${APP}/,/# END PREVIEW pr-${PR_NUMBER}-${APP}/d" "$NGINX_CONF" 2>/dev/null || true
+
+            # Append new block
+            cat >> "$NGINX_CONF" <<EOF
+            # PREVIEW pr-${PR_NUMBER}-${APP}
+            server {
+                listen 80;
+                server_name ${SUBDOMAIN}.dev.ferm.dk;
+                location /.well-known/acme-challenge/ { root /var/www/certbot; }
+                location / { return 301 https://\$host\$request_uri; }
+            }
+            server {
+                listen 443 ssl;
+                http2 on;
+                server_name ${SUBDOMAIN}.dev.ferm.dk;
+                ssl_certificate /etc/letsencrypt/live/${SUBDOMAIN}.dev.ferm.dk/fullchain.pem;
+                ssl_certificate_key /etc/letsencrypt/live/${SUBDOMAIN}.dev.ferm.dk/privkey.pem;
+                ssl_protocols TLSv1.2 TLSv1.3;
+                ssl_ciphers HIGH:!aNULL:!MD5;
+                location / {
+                    proxy_pass http://${CONTAINER}:3000;
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade \$http_upgrade;
+                    proxy_set_header Connection 'upgrade';
+                    proxy_set_header Host \$host;
+                    proxy_set_header X-Forwarded-Proto https;
+                }
+            }
+            # END PREVIEW pr-${PR_NUMBER}-${APP}
+            EOF
+
+            # Issue cert if needed
+            docker exec ferm-preview-nginx certbot certonly --webroot \
+              -w /var/www/certbot \
+              -d "${SUBDOMAIN}.dev.ferm.dk" \
+              --email mads@ferm.dk --agree-tos --non-interactive 2>/dev/null || true
+
+            # Reload Nginx
+            docker exec ferm-preview-nginx nginx -t && docker exec ferm-preview-nginx nginx -s reload
+        env:
+          SUBDOMAIN: ${{ steps.vars.outputs.subdomain }}
+          APP: ${{ steps.detect.outputs.app }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+
+      - name: Comment preview URL on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const subdomain = '${{ steps.vars.outputs.subdomain }}';
+            const url = `https://${subdomain}.dev.ferm.dk`;
+            const app = '${{ steps.detect.outputs.app }}';
+            const body = [
+              `## Preview environment`,
+              ``,
+              `**${app}** is live at: ${url}`,
+              ``,
+              `This preview was deployed from PR #${{ inputs.pr_number }} and will be torn down automatically when the PR is merged or closed.`,
+              ``,
+              `To tear it down manually: re-run the [cleanup workflow](../actions/workflows/pr-preview-cleanup.yml).`,
+            ].join('\n');
+
+            // Delete previous preview comments
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: parseInt('${{ inputs.pr_number }}'),
+            });
+            for (const c of comments.data) {
+              if (c.body.startsWith('## Preview environment')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: c.id,
+                });
+              }
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: parseInt('${{ inputs.pr_number }}'),
+              body,
+            });
