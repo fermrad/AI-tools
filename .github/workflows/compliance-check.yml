@@ -1,0 +1,37 @@
+name: Compliance — ISO 27001 / SOC 2
+
+on:
+  workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false  # skips silently if not set
+
+jobs:
+  compliance:
+    name: Compliance — ISO 27001 / SOC 2
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Checkout calling repo
+        uses: actions/checkout@v4
+
+      - name: Checkout AI-tools (scripts)
+        uses: actions/checkout@v4
+        with:
+          repository: fermrad/AI-tools
+          path: .ai-tools
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install anthropic
+
+      - name: Run compliance check
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 .ai-tools/claude/github-actions/compliance-check.py

@@ -1,0 +1,54 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Session Start
+
+- **Always `git pull origin <current-branch>` at the start of every prompt** before reading files or making changes.
+
+## PR Workflow
+
+- **All changes go through a PR** — never commit directly to `main`. Create a branch, push, open a PR.
+- **Keep PRs small** — split independent changes into separate PRs.
+- **Update the PR description** when pushing additional commits: `gh pr edit <number> --body "..."`.
+- **PR title format**: `type(scope): description` where type is `feat`, `fix`, `refactor`, `ci`, or `docs`.
+- **Target branch**: `main` (or adjust to `staging` if the project uses a staging branch).
+
+## Project Structure
+
+TODO: describe the folder layout of this project.
+
+```
+src/
+  ...
+```
+
+## Commands
+
+TODO: list the key commands for this project.
+
+```bash
+# Development
+npm run dev
+
+# Tests
+npm test
+
+# Type check
+npm run typecheck
+
+# Lint
+npm run lint
+```
+
+## Architecture Notes
+
+TODO: describe any non-obvious architectural decisions, patterns, or constraints Claude should know about.
+
+## Auth / Security
+
+TODO: describe how auth works in this project — session handling, tokens, middleware, etc.
+
+## Infrastructure
+
+TODO: describe how the project is deployed and what infrastructure it runs on.
