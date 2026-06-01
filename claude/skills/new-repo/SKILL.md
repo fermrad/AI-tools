@@ -18,7 +18,7 @@ Create a new GitHub repository following the Ferm conventions. Steps:
      3. **Purpose & responsibility** — who owns this repo, what decisions it is responsible for, and who to contact if something goes wrong. Example: "Owned by the Ferm tech team. This service handles [X]. Questions → [team/person]."
      4. **Getting started** — the commands a developer needs to run to get up and running
      5. **Architecture overview** — brief, with folder structure
-   - `CLAUDE.md` — copy from `fermrad/AI-tools/claude/CLAUDE.md.template` and fill in all TODO sections based on what you know about the project
+   - `CLAUDE.md` — copy from `fermrad/AI-tools/claude/CLAUDE.md.template` and fill in all TODO sections based on what you know about the project. The template includes the branch-from-staging and tests+docs PR rules — do not remove them.
    - `.gitignore` — appropriate for the stack (Node, Python, etc.)
    - `.claude/settings.json` — minimal permissions block (allow test/lint/build commands, deny destructive ones)
 
