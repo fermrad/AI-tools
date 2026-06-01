@@ -8,11 +8,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## PR Workflow
 
-- **All changes go through a PR** — never commit directly to `main`. Create a branch, push, open a PR.
-- **Keep PRs small** — split independent changes into separate PRs.
+- **Every piece of work starts with a new branch based on `staging`**:
+  ```bash
+  git checkout staging && git pull origin staging
+  git checkout -b feat/my-feature   # or fix/, ci/, docs/, refactor/
+  ```
+  Never branch from `main` or from another feature branch.
+
+- **Every PR must contain all three** — do not open a PR until all three are present:
+  1. **The feature or fix** — the code change itself
+  2. **Tests** — new or updated tests covering the happy path and key edge cases; a regression test for bug fixes. Do not open a PR for untested code.
+  3. **Updated documentation** — any docs, README sections, or CLAUDE.md notes that are now stale must be updated in the same PR. Do not leave docs out of sync.
+
+- **All changes go through a PR** — never commit directly to `main` or `staging`. Create a branch, push, open a PR.
+- **Keep PRs small** — split independent changes into separate PRs; a reviewer should be able to understand each PR in under 5 minutes.
 - **Update the PR description** when pushing additional commits: `gh pr edit <number> --body "..."`.
 - **PR title format**: `type(scope): description` where type is `feat`, `fix`, `refactor`, `ci`, or `docs`.
-- **Target branch**: `main` (or adjust to `staging` if the project uses a staging branch).
+- **Target branch**: `staging` for normal work; `main` only for hotfixes.
 
 ## Project Structure
 
