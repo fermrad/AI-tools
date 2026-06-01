@@ -12,7 +12,12 @@ Create a new GitHub repository following the Ferm conventions. Steps:
    ```
 
 3. **Clone or init locally**, then create the initial structure:
-   - `README.md` — project title, one-paragraph description, and a "Getting started" section
+   - `README.md` — structured as follows (required):
+     1. **Project title + one-sentence tagline**
+     2. **What this is** — a plain-language paragraph (2–4 sentences) that a non-technical person can understand. No jargon, no acronyms without explanation. Describe what the tool does and who uses it.
+     3. **Purpose & responsibility** — who owns this repo, what decisions it is responsible for, and who to contact if something goes wrong. Example: "Owned by the Ferm tech team. This service handles [X]. Questions → [team/person]."
+     4. **Getting started** — the commands a developer needs to run to get up and running
+     5. **Architecture overview** — brief, with folder structure
    - `CLAUDE.md` — copy from `fermrad/AI-tools/claude/CLAUDE.md.template` and fill in all TODO sections based on what you know about the project
    - `.gitignore` — appropriate for the stack (Node, Python, etc.)
    - `.claude/settings.json` — minimal permissions block (allow test/lint/build commands, deny destructive ones)
