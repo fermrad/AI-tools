@@ -4,11 +4,11 @@ description: Create a new GitHub repository with standard structure, branch prot
 
 Create a new GitHub repository following the Ferm conventions. Steps:
 
-1. **Ask** (if not already provided): repo name, short description, and whether it is public or private. Always use the `fermrad` org — never ask about it.
+1. **Ask** (if not already provided): repo name and short description. Always use the `fermrad` org and always create repos as **private** — never ask about either.
 
 2. **Create the repo** via `gh repo create`:
    ```bash
-   gh repo create fermrad/<name> --public|--private --description "<desc>"
+   gh repo create fermrad/<name> --private --description "<desc>"
    ```
 
 3. **Clone or init locally**, then create the initial structure:
