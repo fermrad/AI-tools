@@ -1,0 +1,102 @@
+name: Update Documentation
+
+on:
+  workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false   # gracefully skipped if not set
+
+jobs:
+  update-docs:
+    name: Review and update documentation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout PR branch (calling repo)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout AI-tools (for script)
+        uses: actions/checkout@v4
+        with:
+          repository: fermrad/AI-tools
+          path: .ai-tools
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip if no API key
+        id: check_key
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "ANTHROPIC_API_KEY not set — skipping documentation update."
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get changed files and diff
+        if: steps.check_key.outputs.skip == 'false'
+        id: diff
+        run: |
+          BASE="${{ github.base_ref }}"
+          git fetch origin "$BASE"
+          CHANGED=$(git diff --name-only "origin/$BASE...HEAD" | tr '\n' ',')
+          echo "files=${CHANGED}" >> $GITHUB_OUTPUT
+          git diff "origin/$BASE...HEAD" -- . \
+            ':!*.lock' ':!node_modules' ':!dist' ':!.next' ':!vendor' \
+            | head -c 12000 > /tmp/pr_diff.txt
+
+      - name: Set up Python
+        if: steps.check_key.outputs.skip == 'false'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Anthropic SDK
+        if: steps.check_key.outputs.skip == 'false'
+        run: pip install anthropic
+
+      - name: Run documentation updater
+        if: steps.check_key.outputs.skip == 'false'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CHANGED_FILES: ${{ steps.diff.outputs.files }}
+          BASE_REF: ${{ github.base_ref }}
+        run: python .ai-tools/.github/scripts/update-docs.py || true
+
+      - name: Commit documentation changes
+        if: steps.check_key.outputs.skip == 'false'
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Stage docs files and README — ignore errors for files that don't exist
+          git add docs/ README.md ARCHITECTURE.md 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            git commit -m "docs: auto-update for PR #${{ github.event.pull_request.number }}"
+            git push origin HEAD:${{ github.head_ref }}
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Comment on PR if docs were updated
+        if: steps.check_key.outputs.skip == 'false' && steps.commit.outputs.changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '📄 Documentation was automatically updated based on the changes in this PR. Review the new commits above.',
+            });
