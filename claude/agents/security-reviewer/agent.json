@@ -1,0 +1,6 @@
+{
+  "name": "security-reviewer",
+  "description": "Security-focused code review agent. Reads files and searches for vulnerabilities. Cannot modify code.",
+  "model": "claude-opus-4-7",
+  "tools": ["Read", "Bash(grep *)", "Bash(find *)", "Bash(git log *)", "Bash(git diff *)"]
+}

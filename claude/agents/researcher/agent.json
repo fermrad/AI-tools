@@ -1,0 +1,6 @@
+{
+  "name": "researcher",
+  "description": "Read-only research agent. Searches the web, reads files, and summarises findings. Cannot write or execute code.",
+  "model": "claude-sonnet-4-6",
+  "tools": ["WebSearch", "WebFetch", "Read", "Bash(grep *)", "Bash(find *)"]
+}
