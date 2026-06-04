@@ -27,7 +27,12 @@ Environment variables injected into every Bash call Claude makes.
 |---|---|
 | `project-settings.template.json` | `.claude/settings.json` in any project |
 
+> **Note:** `project-settings.template.json` is strict JSON (no comments allowed). When you copy it into `.claude/settings.json`, do **not** also commit your `.claude/settings.local.json` — add it to `.gitignore` first (see below).
+
 ## `.gitignore` entry to add
+
+Always add this line to the project's `.gitignore` **before** creating `.claude/settings.local.json` — personal overrides must never be committed:
+
 ```
 .claude/settings.local.json
 ```

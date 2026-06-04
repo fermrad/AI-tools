@@ -52,6 +52,8 @@ jobs:
 | `ANTHROPIC_API_KEY` | issue triage, compliance | Calls the Claude API |
 | `GITHUB_TOKEN` | all workflows | Auto-provided by GitHub Actions — no setup needed |
 
+> `ANTHROPIC_API_KEY` is required by **issue-triage** and **compliance-check** only. **Pentest does not require it** — its findings come from Semgrep, Trivy, Gitleaks, and `npm audit` and are not AI-analysed.
+
 ## Scripts
 
 | Script | Called by |

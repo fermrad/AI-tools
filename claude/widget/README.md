@@ -20,12 +20,14 @@ A floating Claude chat panel that can be embedded in any Next.js app. Developers
 ## Quick install
 
 ```bash
-# From the AI-tools root:
-bash scripts/sync-ai-widget.sh apps/komm
+# From the ferm-tools root (one level above AI-tools):
+bash AI-tools/scripts/sync-ai-widget.sh apps/komm
 
 # Then:
 cd apps/komm && npm install ai @ai-sdk/anthropic
 ```
+
+> The sync script resolves `apps/<name>` relative to **ferm-tools** (two levels up from the script), so it must be invoked from a working directory where `apps/<name>` is a valid ferm-tools app path.
 
 See [INSTALL.md](./INSTALL.md) for the full setup including auth wiring and env vars.
 

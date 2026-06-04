@@ -65,6 +65,6 @@ jobs:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `ai-issue-triage.yml` | `issues: [opened]` | Claude reads the issue + relevant files; opens a draft fix PR or posts analysis |
-| `compliance-check.yml` | Any PR / manual | Claude maps the codebase against ISO 27001 and SOC 2 controls; files labelled issues |
-| `pentest.yml` | Manual | Semgrep + Trivy + Gitleaks + npm audit + optional ZAP scan; files `security` issues |
+| `ai-issue-triage.yml` | `workflow_call` (called on `issues: [opened]` from caller) | Claude reads the issue + relevant files; opens a draft fix PR or posts analysis |
+| `compliance-check.yml` | `workflow_call` only (called from a caller's CI on PR) | Claude maps the codebase against ISO 27001 and SOC 2 controls; files labelled issues |
+| `pentest.yml` | `workflow_call` (caller exposes `workflow_dispatch` for manual runs) | Semgrep + Trivy + Gitleaks + npm audit + optional ZAP scan; files `security` issues |
