@@ -30,14 +30,14 @@ Model Context Protocol (MCP) servers extend Claude with additional tools and res
 
 ## Useful MCP servers
 
-| Server | Package | What it adds |
+| Server | Package / transport | What it adds |
 |---|---|---|
-| GitHub | `@modelcontextprotocol/server-github` | PR, issue, and repo tools |
-| PostgreSQL | `@modelcontextprotocol/server-postgres` | Query and introspect a Postgres DB |
-| Filesystem | `@modelcontextprotocol/server-filesystem` | Scoped file access |
-| Fetch | `@modelcontextprotocol/server-fetch` | Fetch URLs as tools |
-| Linear | via Linear MCP | Create/update Linear issues |
-| Slack | via Slack MCP | Read/post Slack messages |
+| GitHub | `@modelcontextprotocol/server-github` (stdio) | PR, issue, and repo tools |
+| PostgreSQL | `@modelcontextprotocol/server-postgres` (stdio) | Query and introspect a Postgres DB |
+| Filesystem | `@modelcontextprotocol/server-filesystem` (stdio) | Scoped file access |
+| Fetch | `@modelcontextprotocol/server-fetch` (stdio) | Fetch URLs as tools |
+| Linear | `https://mcp.linear.app/sse` (remote HTTP/SSE — no npm package) | Create/update Linear issues |
+| Slack | `@modelcontextprotocol/server-slack` (stdio) | Read/post Slack messages |
 
 ## User-scoped MCP config (`~/.claude/settings.json`)
 

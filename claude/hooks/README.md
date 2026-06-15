@@ -14,6 +14,8 @@ Hooks run shell commands in response to Claude Code events. They go in `.claude/
 
 ## Template — `.claude/settings.json`
 
+> Customize the `command` values per your project's test/type-check setup (e.g. swap `npx tsc --noEmit` for `pnpm test`, `npm run lint`, or whatever your project uses).
+
 ```json
 {
   "hooks": {

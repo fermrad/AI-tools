@@ -38,10 +38,14 @@ Create a new GitHub repository following the Ferm conventions. Steps:
    ```bash
    gh api repos/<org>/<name>/branches/main/protection \
      --method PUT \
-     --field required_status_checks='{"strict":true,"contexts":[]}' \
-     --field enforce_admins=false \
-     --field required_pull_request_reviews='{"required_approving_review_count":1}' \
-     --field restrictions=null
+     --input - <<'JSON'
+   {
+     "required_status_checks": {"strict": true, "contexts": []},
+     "enforce_admins": false,
+     "required_pull_request_reviews": {"required_approving_review_count": 1},
+     "restrictions": null
+   }
+   JSON
    ```
 
 7. **Wire up reusable AI workflows** (ask the user which ones they want):

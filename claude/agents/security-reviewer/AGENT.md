@@ -5,7 +5,7 @@
 
 ## Tool restrictions
 - ✅ Read, grep, find, git log, git diff
-- ❌ Write, Edit, Bash (unrestricted), WebSearch
+- ❌ WebSearch, WebFetch, Write, Edit, Bash (unrestricted), Agent
 
 ## Example delegation
 ```

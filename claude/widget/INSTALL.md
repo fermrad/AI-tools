@@ -12,10 +12,10 @@ A floating Claude chat panel for Next.js apps. Developers can ask questions abou
 
 ## 1. Sync the widget into your app
 
-From the ferm-tools root:
+From the **ferm-tools** root (one level above AI-tools — the script resolves `apps/<name>` two levels up from itself, so it must be invoked from there):
 
 ```bash
-bash scripts/sync-ai-widget.sh apps/komm   # or apps/risk / apps/crm/app
+bash AI-tools/scripts/sync-ai-widget.sh apps/komm   # or apps/risk / apps/crm/app
 ```
 
 This copies `src/AIWidget.tsx` and `src/chat-route.ts` into:
@@ -103,10 +103,10 @@ Use the same `getSession()` pattern the rest of the app uses.
 
 ## Keeping it updated
 
-When the widget is updated in AI-tools, re-run the sync script:
+When the widget is updated in AI-tools, re-run the sync script from the **ferm-tools** root:
 
 ```bash
-bash scripts/sync-ai-widget.sh apps/komm
+bash AI-tools/scripts/sync-ai-widget.sh apps/komm
 ```
 
 The sync script overwrites `AIWidget.tsx` and `chat-route.ts` — do not edit those files in the app directly. Customise the system prompt in `chat-route.ts` after syncing if needed.

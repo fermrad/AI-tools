@@ -21,7 +21,7 @@ The `claude/github-actions/` folder contains reusable GitHub Actions workflows a
 - **`ai-issue-triage`** — when a GitHub issue is opened, Claude reads relevant files and either opens a draft fix PR or posts an analysis comment.
 - **`compliance-check`** — reads auth code, middleware, Dockerfiles, and CI workflows; maps gaps against ISO 27001 and SOC 2 controls; files labelled GitHub issues for new gaps.
 
-To use in a project: copy the relevant `.yml` and `.py` files into `.github/workflows/` and `.github/scripts/`, then add `ANTHROPIC_API_KEY` to the repo's Actions secrets.
+To use in a project: copy only the `.yml` workflow files into `.github/workflows/` (typically just a thin caller that delegates to `fermrad/AI-tools/.github/workflows/<workflow>.yml@main`). The supporting Python scripts are fetched at workflow runtime via `actions/checkout` of `fermrad/AI-tools` — **do not copy the `.py` files into the calling repo**. Then add `ANTHROPIC_API_KEY` to the repo's Actions secrets (only required for `ai-issue-triage` and `compliance-check`; `pentest` does not need it).
 
 ### CLAUDE.md template
 
