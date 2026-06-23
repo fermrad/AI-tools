@@ -33,11 +33,9 @@ scripts/               # Utility scripts
 
 ## PR workflow
 
-- PRs target `main`.
-- Title format: `type(tool): description`
-  - `type`: `feat`, `fix`, `docs`, `refactor`
-  - `tool`: `claude`, `cursor`, `copilot`, `openai`, `perplexity`, `scripts`, `github-actions`
-- Branch protection on `main` (1 required review).
+All changes go through a PR to `main` — see `CONTRIBUTING.md` for branch naming, PR title format, and template propagation steps.
+
+- Always `git pull origin main` before starting work.
 
 ## Updating a template
 
