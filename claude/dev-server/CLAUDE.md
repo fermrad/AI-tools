@@ -21,6 +21,25 @@ You are running on a shared Hetzner server dedicated to AI-assisted development 
 
 ---
 
+## Access modes
+
+There are two ways to work with Claude Code on this server. Both share the same persistent home directory, so repos, worktrees, and conversation history are identical regardless of which mode you use.
+
+| Mode | How to access | Best for |
+|---|---|---|
+| **CLI + tmux** | SSH into your account, run `claude` inside a named tmux session | Heads-down coding, terminal comfort |
+| **Remote Control** | Connect from `claude.ai/code`, the Claude desktop app, or the Claude mobile app | Reviews, quick follow-ups, switching between devices |
+
+**Remote Control:** a `claude remote-control` process runs permanently in your account as a systemd user service. It phones home to Anthropic's API over outbound HTTPS — no ports need to be open. Connect from any client via `claude.ai/code`. When you disconnect, the session stays live on the server; reconnect from a different device and pick up exactly where you left off. To check it is running:
+
+```bash
+systemctl --user status claude-remote.service
+```
+
+**Resuming after API credit limits:** if Claude Code stops because credits ran out, top up the Anthropic account, then either reattach to your tmux session and run `claude --continue`, or reconnect via `claude.ai/code` — both resume the conversation from `~/.claude/conversations/` on the persistent volume.
+
+---
+
 ## Session start
 
 Before any work:
