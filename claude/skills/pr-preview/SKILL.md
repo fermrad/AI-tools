@@ -24,34 +24,37 @@ Use this skill when someone asks:
 
 ## Steps
 
-### 1. Identify the PR
+### 1. Detect the current repo
+
+```bash
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+```
+
+### 2. Identify the PR
 
 If a PR number is provided (`/pr-preview 42`), use it. Otherwise ask: "Which PR or branch should I deploy?"
 
 ```bash
-gh pr view <number> --json headRefName,number,title,url
+gh pr view <number> --json headRefName,number,title,url --repo $REPO
 ```
 
-### 2. Trigger the preview deployment
+### 3. Trigger the preview deployment
 
 ```bash
 gh workflow run pr-preview.yml \
-  --repo fermrad/ferm-tools \
+  --repo $REPO \
   --field pr_number=<number>
 ```
 
-### 3. Wait for the deployment to complete
+### 4. Wait for the deployment to complete
 
 ```bash
-# Get the run ID of the workflow we just triggered
 sleep 5
-RUN_ID=$(gh run list --repo fermrad/ferm-tools --workflow pr-preview.yml --limit 1 --json databaseId -q '.[0].databaseId')
-
-# Watch it
-gh run watch $RUN_ID --repo fermrad/ferm-tools
+RUN_ID=$(gh run list --repo $REPO --workflow pr-preview.yml --limit 1 --json databaseId -q '.[0].databaseId')
+gh run watch $RUN_ID --repo $REPO
 ```
 
-### 4. Report the preview URL
+### 5. Report the preview URL
 
 The workflow posts the URL as a PR comment automatically. Also output it here:
 
@@ -63,7 +66,7 @@ Preview live at: https://pr-<number>.dev.ferm.dk
 
 ## How the workflow works (`pr-preview.yml`)
 
-See `.github/workflows/pr-preview.yml` in `fermrad/ferm-tools`. The workflow:
+See `.github/workflows/pr-preview.yml` in the repo. The workflow:
 
 1. Checks out the PR branch
 2. SSHs into the dev server
@@ -80,6 +83,6 @@ Previews are cleaned up automatically. To tear one down manually:
 
 ```bash
 gh workflow run cleanup-preview.yml \
-  --repo fermrad/ferm-tools \
+  --repo $REPO \
   --field pr_number=<number>
 ```
