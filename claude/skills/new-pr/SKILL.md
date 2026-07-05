@@ -4,18 +4,17 @@ description: Create a well-formed pull request following the project's PR conven
 
 Open a pull request for the current branch. Steps:
 
-1. **Verify the branch** is not `main` or `staging`. If it is, stop and tell the user to create a feature branch based on `staging` first:
+1. **Verify the branch** is not `main`. If it is, stop and tell the user to create a feature branch based on `main` first:
    ```bash
-   git checkout staging && git pull origin staging
+   git checkout main && git pull origin main
    git checkout -b feat/my-feature
    ```
-   All new branches must start from `staging`, not from `main` or another feature branch.
+   All new branches must start from `main`, not from another feature branch.
 
-   Also verify that branch protection is enabled on the base branch. If it isn't, apply it now before creating the PR:
+   Also verify that branch protection is enabled on `main`. If it isn't, apply it now before creating the PR:
    ```bash
-   BASE="staging"  # or main
    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-   gh api repos/$REPO/branches/$BASE/protection \
+   gh api repos/$REPO/branches/main/protection \
      --method PUT \
      --input - <<'JSON'
    {
@@ -51,6 +50,10 @@ Open a pull request for the current branch. Steps:
 
 6. **Verify the PR contains all three required elements** — do not open the PR until all three are present:
 
+   **The change:**
+   - All code changes must be committed and pushed to the feature branch.
+   - Do not open a PR with partial or placeholder work.
+
    **Tests:**
    - Every new feature must have tests covering the happy path and key edge cases.
    - Every bug fix must have a regression test that would have caught the bug.
@@ -69,12 +72,12 @@ Open a pull request for the current branch. Steps:
 
 8. **Create the PR** targeting the correct base branch (default: `staging`):
    ```bash
-   gh pr create --base staging --title "<title>" --body-file /tmp/pr-body.txt
+   gh pr create --base main --title "<title>" --body-file /tmp/pr-body.txt
    ```
 
 9. **Apply labels** matching the scope and target branch:
    ```bash
-   gh pr edit <number> --add-label "<scope>" --add-label "staging"
+   gh pr edit <number> --add-label "<scope>" --add-label "main"
    ```
 
 10. **Confirm** by printing the PR URL.
