@@ -9,13 +9,14 @@ REPO_DIR="$HOME/repos/AI-tools"
 COMMANDS_SRC="$REPO_DIR/claude/commands"
 COMMANDS_DST="$HOME/.claude/commands"
 
-# Clone or update AI-tools
+# Clone or update AI-tools (claude/ folder only)
 if [ -d "$REPO_DIR/.git" ]; then
   echo "Updating AI-tools..."
   git -C "$REPO_DIR" pull --ff-only
 else
-  echo "Cloning AI-tools..."
-  gh repo clone fermrad/AI-tools "$REPO_DIR"
+  echo "Cloning AI-tools (claude/ only)..."
+  gh repo clone fermrad/AI-tools "$REPO_DIR" -- --filter=blob:none --sparse
+  git -C "$REPO_DIR" sparse-checkout set claude
 fi
 
 mkdir -p "$COMMANDS_DST"
