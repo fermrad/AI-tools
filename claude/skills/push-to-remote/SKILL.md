@@ -32,10 +32,11 @@ Steps:
      Present the list as `<session-id>  "<last-prompt-preview>"` and ask which to push. Wait for the user's selection.
    - If **no files** are returned: tell the user no active session was found and stop.
 
-3. SCP the selected session file to the server:
+3. SCP the selected session file to the server (using the username from step 1):
    ```
+   ssh <username>@claude-dev.ferm.dk "mkdir -p ~/.claude/projects/-pushed"
    scp <full-path-to-jsonl> \
-     MadsSFox@claude-dev.ferm.dk:~/.claude/projects/-pushed/<session-id>.jsonl
+     <username>@claude-dev.ferm.dk:~/.claude/projects/-pushed/<session-id>.jsonl
    ```
 
 4. Trigger the workflow with the session ID:
