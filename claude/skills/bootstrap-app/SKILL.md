@@ -6,17 +6,22 @@ Set up a new app for deployment on the Ferm infrastructure. Triggers the Bootstr
 
 ## Prerequisites (check before proceeding)
 
-Verify both of these are true — stop and tell the user if not:
+Verify all three — stop and tell the user what's missing if any fail:
 
 ```bash
-# 1. SSH_PRIVATE_KEY must exist in the target repo's Actions secrets
+# 1. Repo must exist
+gh api repos/fermrad/<repo> --silent
+
+# 2. SSH_PRIVATE_KEY must exist in the target repo's Actions secrets
 gh api repos/fermrad/<repo>/actions/secrets --jq '[.secrets[].name]' | grep SSH_PRIVATE_KEY
 
-# 2. GH_TOKEN_TERRAFORM must exist in the infrastructure repo
+# 3. GH_TOKEN_TERRAFORM must exist in the infrastructure repo
 gh api repos/fermrad/infrastructure/actions/secrets --jq '[.secrets[].name]' | grep GH_TOKEN_TERRAFORM
 ```
 
-If `SSH_PRIVATE_KEY` is missing from the target repo, tell the user to run the **Terraform GitHub → apply** workflow in infrastructure first to distribute the deploy key.
+- If the **repo doesn't exist**: offer to run `/new-repo` first to create it, then come back to this skill.
+- If **`SSH_PRIVATE_KEY` is missing**: tell the user to run the **Terraform GitHub → apply** workflow in infrastructure first to distribute the deploy key.
+- If **`GH_TOKEN_TERRAFORM` is missing**: tell the user to add it to the infrastructure repo's Actions secrets.
 
 ## Steps
 
