@@ -1,11 +1,22 @@
 #!/bin/bash
 # Installs ferm Claude Code skills into ~/.claude/commands/
-# Usage: ./claude/install.sh  (or run via the one-liner in the README)
+#
+# One-liner (works with private repo via gh auth):
+#   gh api repos/fermrad/AI-tools/contents/claude/install-claude-skills.sh --jq '.content' | base64 -d | bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMANDS_SRC="$SCRIPT_DIR/commands"
+REPO_DIR="$HOME/repos/AI-tools"
+COMMANDS_SRC="$REPO_DIR/claude/commands"
 COMMANDS_DST="$HOME/.claude/commands"
+
+# Clone or update AI-tools
+if [ -d "$REPO_DIR/.git" ]; then
+  echo "Updating AI-tools..."
+  git -C "$REPO_DIR" pull --ff-only
+else
+  echo "Cloning AI-tools..."
+  gh repo clone fermrad/AI-tools "$REPO_DIR"
+fi
 
 mkdir -p "$COMMANDS_DST"
 
