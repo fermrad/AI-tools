@@ -9,7 +9,8 @@ Full end-to-end setup for a new Ferm app: create the repo from the boilerplate, 
 If not provided as arguments, ask:
 - **Repo name** — the new fermrad repo (e.g. `my-app`)
 - **Short description** — one sentence describing the app
-- **Subdomain** — the public subdomain (e.g. `my-app` → `my-app.ferm.dk` in prod, `staging.my-app.ferm.dk` in staging, `dev.my-app.ferm.dk` in dev)
+- **Subdomain** — the public subdomain (e.g. `my-app` → `my-app.ferm.dk` in prod, `staging.my-app.ferm.dk` in staging)
+- **Server type** — `internal` (default — Tailscale VPN only, DNS resolves to internal IPs, Caddyfile.internal) or `public` (internet-facing, DNS resolves to public IPs, Caddyfile.staging/production/dev)
 
 ## Step 2 — Create the repo from boilerplate (if it doesn't exist)
 
@@ -72,15 +73,16 @@ Print a summary before triggering the workflow:
 
 ```
 Repo:       fermrad/<repo>  (created from boilerplate / already existed)
+Server:     internal (Tailscale VPN)  OR  public (internet-facing)
 Production: <subdomain>.ferm.dk
 Staging:    staging.<subdomain>.ferm.dk
-Dev:        dev.<subdomain>.ferm.dk
-PR stacks:  {pr-number}.dev.<subdomain>.ferm.dk
+Dev:        dev.<subdomain>.ferm.dk   [public only]
+PR stacks:  {pr-number}.dev.<subdomain>.ferm.dk  [public only]
 
 Bootstrap will open up to 3 PRs:
   1. DNS records (infrastructure repo)
   2. Deploy workflows (target repo)
-  3. Caddy routing blocks (infrastructure repo)
+  3. Caddy routing blocks (infrastructure repo — Caddyfile.internal or .staging/.production/.dev)
 ```
 
 ## Step 5 — Trigger the bootstrap workflow
@@ -89,7 +91,8 @@ Bootstrap will open up to 3 PRs:
 gh workflow run bootstrap-app.yml \
   --repo fermrad/infrastructure \
   --field repo=<repo> \
-  --field subdomain=<subdomain>
+  --field subdomain=<subdomain> \
+  --field server=<internal|public>
 ```
 
 ## Step 6 — Watch the run
@@ -115,7 +118,9 @@ After the PRs are merged:
 
 1. **DNS PR** — merge, then trigger **Terraform DNS → apply** in infrastructure to make the records live
 2. **Deploy workflows PR** — merge into the target repo; staging deploys on every push to `main`, production on release tags
-3. **Caddyfile PR** — merge, then trigger **Deploy Caddy** for staging and production environments
+3. **Caddyfile PR**:
+   - **Public**: merge, then trigger **Deploy Caddy → staging** and **Deploy Caddy → production**
+   - **Internal**: merge, then trigger **Deploy Caddy → internal-staging**
 
 ---
 
