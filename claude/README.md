@@ -16,6 +16,30 @@ Tools, templates, and configurations for [Claude Code](https://claude.ai/code).
 
 ---
 
+## Installing skills
+
+Run the install script to symlink all skills into `~/.claude/skills/`:
+
+```bash
+bash ~/repos/AI-tools/claude/install-claude-skills.sh
+```
+
+If you haven't cloned the repo yet, use the one-liner (public repo — no auth needed):
+
+```bash
+git clone --filter=blob:none --sparse https://github.com/fermrad/AI-tools.git ~/repos/AI-tools \
+  && git -C ~/repos/AI-tools sparse-checkout set claude \
+  && bash ~/repos/AI-tools/claude/install-claude-skills.sh
+```
+
+> **You must restart Claude Code after running this script** — skills are only discovered at startup. Type `/` after restarting to see them.
+
+Skills are installed as symlinks so `git pull` in `~/repos/AI-tools` is enough to pick up updates; no reinstall needed (but restart Claude Code to load new skills).
+
+**On `claude-dev.ferm.dk`**: the `start-claude-session.yml` workflow runs the install script automatically before starting each session — no manual step needed.
+
+---
+
 ## Skills vs Agents — when to use which
 
 | | Skill | Agent |
