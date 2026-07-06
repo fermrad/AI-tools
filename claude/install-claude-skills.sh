@@ -1,8 +1,12 @@
 #!/bin/bash
 # Installs ferm Claude Code skills into ~/.claude/skills/
 #
-# One-liner (works with private repo via gh auth):
-#   gh api repos/fermrad/AI-tools/contents/claude/install-claude-skills.sh --jq '.content' | base64 -d | bash
+# One-liner (public repo — no auth needed):
+#   git clone --filter=blob:none --sparse https://github.com/fermrad/AI-tools.git ~/repos/AI-tools \
+#     && git -C ~/repos/AI-tools sparse-checkout set claude \
+#     && bash ~/repos/AI-tools/claude/install-claude-skills.sh
+#
+# After running: restart Claude Code for skills to appear in the / menu.
 set -euo pipefail
 
 REPO_DIR="$HOME/repos/AI-tools"
