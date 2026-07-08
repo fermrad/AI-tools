@@ -1,4 +1,5 @@
 ---
+name: new-pr
 description: Create a well-formed pull request following the project's PR conventions
 ---
 

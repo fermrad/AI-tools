@@ -1,5 +1,7 @@
 ---
+name: pr-preview
 description: Deploy a PR branch as a live preview environment on the development Hetzner server, then post the preview URL as a PR comment
+argument-hint: <pr-number>
 ---
 
 # PR Preview Deployment

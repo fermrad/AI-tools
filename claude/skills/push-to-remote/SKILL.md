@@ -1,4 +1,5 @@
 ---
+name: push-to-remote
 description: Push the current local Claude conversation to claude-dev.ferm.dk and resume it there
 ---
 
