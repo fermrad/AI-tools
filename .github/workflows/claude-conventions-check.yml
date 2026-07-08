@@ -2,10 +2,9 @@ name: Claude Conventions Check
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened]
     paths:
       - 'claude/**'
-      - '.github/workflows/claude-conventions-check.yml'
-      - '.github/scripts/claude-conventions-check.py'
 
 jobs:
   lint-skills:

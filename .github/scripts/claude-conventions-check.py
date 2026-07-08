@@ -28,10 +28,10 @@ result = subprocess.run(
     env={**os.environ, "GH_TOKEN": GH_TOKEN},
 )
 all_changed = json.loads(result.stdout)
-changed_files = [f for f in all_changed if f.startswith("claude/") or f.startswith(".github/")]
+changed_files = [f for f in all_changed if f.startswith("claude/")]
 
 if not changed_files:
-    print("No changed files in claude/ or .github/ — skipping review")
+    print("No changed files in claude/ — skipping review")
     sys.exit(0)
 
 # Read file contents (skip deleted files)
