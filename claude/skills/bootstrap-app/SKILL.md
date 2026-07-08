@@ -1,5 +1,7 @@
 ---
+name: bootstrap-app
 description: Create a new fermrad app from the boilerplate and wire up DNS, deploy workflows, Caddy routing, and Microsoft Entra SSO registration for prod/staging/dev
+argument-hint: <repo-name> [subdomain] [internal|public]
 ---
 
 Full end-to-end setup for a new Ferm app: create the repo from the boilerplate, trigger the Bootstrap App workflow to open PRs for DNS, deploy workflows, and Caddy routing — and optionally register Entra app registrations for both staging and production.

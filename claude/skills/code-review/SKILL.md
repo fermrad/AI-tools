@@ -1,4 +1,5 @@
 ---
+name: code-review
 description: Review staged changes or a PR diff for bugs, security issues, and quality
 ---
 

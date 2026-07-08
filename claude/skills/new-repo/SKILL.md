@@ -1,5 +1,7 @@
 ---
+name: new-repo
 description: Create a new GitHub repository with standard structure, branch protection, labels, and a CLAUDE.md
+argument-hint: <repo-name> [description]
 ---
 
 Create a new GitHub repository following the Ferm conventions. Steps:

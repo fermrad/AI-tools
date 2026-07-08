@@ -1,4 +1,5 @@
 ---
+name: new-remote-session
 description: Start a new Claude remote session on claude-dev.ferm.dk
 ---
 
