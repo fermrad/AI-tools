@@ -14,10 +14,14 @@ import tempfile
 
 import anthropic
 
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 GH_TOKEN = os.environ["GH_TOKEN"]
 GITHUB_REPOSITORY = os.environ["GITHUB_REPOSITORY"]
 PR_NUMBER = os.environ["PR_NUMBER"]
+
+if not ANTHROPIC_API_KEY:
+    print("ANTHROPIC_API_KEY not set — skipping AI review")
+    sys.exit(0)
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 

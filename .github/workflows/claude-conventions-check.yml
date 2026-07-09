@@ -10,6 +10,7 @@ jobs:
   lint-skills:
     name: Lint skills (pulser)
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
 
@@ -26,7 +27,7 @@ jobs:
   review-conventions:
     name: Review conventions (AI)
     runs-on: ubuntu-latest
-    if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+    if: github.event_name == 'pull_request'
     permissions:
       contents: read
       pull-requests: write
