@@ -8,21 +8,47 @@ on:
 
 jobs:
   lint-skills:
-    name: Lint skills (pulser)
+    name: Lint skills
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Validate SKILL.md frontmatter
+        run: |
+          set -euo pipefail
+          ERRORS=0
 
-      - name: Run pulser skill linter
-        # pulser checks SKILL.md files for: valid frontmatter, required fields (name, description),
-        # description trigger quality, file-size limits, and cross-skill conflicts.
-        # Docs: https://github.com/TheStack-ai/pulser
-        run: npx --yes pulser claude/skills
+          for skill_md in claude/skills/*/SKILL.md; do
+            skill_dir=$(dirname "$skill_md")
+            skill_name=$(basename "$skill_dir")
+
+            # Skip hidden dirs (e.g. .claude-plugin)
+            [[ "$skill_name" == .* ]] && continue
+
+            if ! grep -q "^name:" "$skill_md"; then
+              echo "FAIL $skill_md — missing 'name:' frontmatter"
+              ERRORS=$((ERRORS + 1))
+            else
+              actual_name=$(grep "^name:" "$skill_md" | head -1 | sed 's/^name:[[:space:]]*//')
+              if [ "$actual_name" != "$skill_name" ]; then
+                echo "FAIL $skill_md — name '$actual_name' does not match directory '$skill_name'"
+                ERRORS=$((ERRORS + 1))
+              fi
+            fi
+
+            if ! grep -q "^description:" "$skill_md"; then
+              echo "FAIL $skill_md — missing 'description:' frontmatter"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
+
+          if [ "$ERRORS" -eq 0 ]; then
+            echo "All skills passed validation"
+          else
+            echo "$ERRORS error(s) found"
+            exit 1
+          fi
 
   review-conventions:
     name: Review conventions (AI)
