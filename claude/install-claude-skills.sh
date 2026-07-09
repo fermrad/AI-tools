@@ -1,5 +1,6 @@
 #!/bin/bash
-# Installs Fermrad Claude Code skills as a plugin into ~/.claude/plugins/local/fermrad-skills/
+# Installs Fermrad Claude Code skills by symlinking them into ~/.claude/skills/
+# Claude Code auto-discovers skills in that directory — no plugin registration needed.
 #
 # One-liner (requires gh CLI authenticated):
 #   bash <(curl -fsSL https://raw.githubusercontent.com/fermrad/AI-tools/main/claude/install-claude-skills.sh)
@@ -9,13 +10,12 @@
 #     && git -C ~/repos/AI-tools sparse-checkout set claude \
 #     && bash ~/repos/AI-tools/claude/install-claude-skills.sh
 #
-# After running: open a new Claude Code session and run /plugin install to register,
-# or restart Claude Code — it will prompt to install the plugin on next launch.
+# After running: restart Claude Code and type / to see the skills.
 set -euo pipefail
 
 REPO_DIR="$HOME/repos/AI-tools"
-PLUGIN_SRC="$REPO_DIR/claude/skills"
-PLUGIN_DST="$HOME/.claude/plugins/local/fermrad-skills"
+SKILLS_SRC="$REPO_DIR/claude/skills"
+SKILLS_DST="$HOME/.claude/skills"
 
 # Clone or update AI-tools (claude/ folder only)
 if [ -d "$REPO_DIR/.git" ]; then
@@ -27,17 +27,24 @@ else
   git -C "$REPO_DIR" sparse-checkout set claude
 fi
 
-# Symlink the entire skills directory as a local plugin
-mkdir -p "$(dirname "$PLUGIN_DST")"
-ln -sfn "$PLUGIN_SRC" "$PLUGIN_DST"
+mkdir -p "$SKILLS_DST"
+
+INSTALLED=0
+for skill_dir in "$SKILLS_SRC"/*/; do
+  [ -d "$skill_dir" ] || continue
+  name="$(basename "$skill_dir")"
+  # Skip hidden dirs like .claude-plugin
+  [[ "$name" == .* ]] && continue
+  ln -sfn "$skill_dir" "$SKILLS_DST/$name"
+  echo "  /$name"
+  INSTALLED=$((INSTALLED + 1))
+done
+
+if [ "$INSTALLED" -eq 0 ]; then
+  echo "No skills found in $SKILLS_SRC"
+  exit 1
+fi
 
 echo ""
-echo "Plugin symlinked: $PLUGIN_DST -> $PLUGIN_SRC"
-echo ""
-echo "Next step: in Claude Code run:"
-echo "  /plugin install https://github.com/fermrad/AI-tools/tree/main/claude/skills"
-echo ""
-echo "Or register locally by running this in a Claude Code session:"
-echo "  /plugin install $PLUGIN_DST"
-echo ""
-echo "After installing, type / to see the skills."
+echo "Installed $INSTALLED skill(s) into $SKILLS_DST"
+echo "Restart Claude Code and type / to see them."
