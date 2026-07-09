@@ -18,39 +18,21 @@ Tools, templates, and configurations for [Claude Code](https://claude.ai/code).
 
 ## Installing skills
 
-Skills are packaged as a Claude Code plugin. Install from the GitHub repo path directly in a Claude Code session:
+Run the install script — it clones this repo (sparse, `claude/` only) and symlinks each skill into `~/.claude/skills/`. Claude Code auto-discovers skills in that directory.
 
-```
-/plugin install https://github.com/fermrad/AI-tools/tree/main/claude/skills
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/fermrad/AI-tools/main/claude/install-claude-skills.sh)
 ```
 
-> After installing, restart Claude Code and type `/` to see all skills.
+> **Restart Claude Code after running** — skills are discovered at startup. Type `/` to see them.
 
 ### Updating
 
-Skills update automatically when the repo updates — no reinstall needed. If you need to force a refresh:
+Skills are installed as symlinks, so `git pull` in `~/repos/AI-tools` picks up changes automatically. Restart Claude Code to load updated skill content.
 
-```
-/plugin update fermrad-skills
-```
+### On `claude-dev.ferm.dk`
 
-### Manual install (clone-first)
-
-If you prefer to work from a local clone (e.g. to test changes before pushing):
-
-```bash
-gh repo clone fermrad/AI-tools ~/repos/AI-tools -- --filter=blob:none --sparse \
-  && git -C ~/repos/AI-tools sparse-checkout set claude \
-  && bash ~/repos/AI-tools/claude/install-claude-skills.sh
-```
-
-Then in Claude Code:
-
-```
-/plugin install ~/.claude/plugins/local/fermrad-skills
-```
-
-**On `claude-dev.ferm.dk`**: the `start-claude-session.yml` workflow runs the install script automatically before starting each session — no manual step needed.
+The `start-claude-session.yml` workflow runs the install script automatically before each remote session — no manual step needed.
 
 ---
 
