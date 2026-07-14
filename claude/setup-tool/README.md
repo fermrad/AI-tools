@@ -44,13 +44,25 @@ Download [`ferm-setup-windows-amd64.exe`](https://github.com/fermrad/AI-tools/re
 
 ### Manual download (macOS)
 
-If you download the `.zip` via a browser instead, macOS Gatekeeper will block the binary. Fix it by running:
+If you download the `.zip` via a browser, macOS Gatekeeper will block it the first time. This is a one-time click to allow it:
 
-```bash
-xattr -d com.apple.quarantine ./ferm-setup-darwin-arm64
-```
+**Step 1** — Double-click the binary. macOS shows a dialog:
 
-Or: open System Settings → Privacy & Security → scroll down → Allow Anyway.
+> *"ferm-setup-darwin-arm64" can't be opened because Apple cannot check it for malicious software.*
+
+Click **OK** to dismiss it.
+
+**Step 2** — Open **System Settings** → **Privacy & Security**. Scroll down to the **Security** section. You will see:
+
+> *"ferm-setup-darwin-arm64" was blocked from use because it is not from an identified developer.*
+
+Click **Allow Anyway**. Confirm with Touch ID or your password.
+
+**Step 3** — Double-click the binary again. A new dialog appears:
+
+> *macOS cannot verify the developer of "ferm-setup-darwin-arm64". Are you sure you want to open it?*
+
+Click **Open**. The tool launches and this prompt never appears again for this binary.
 
 A browser window opens showing live progress. The only action required is clicking "Connect with GitHub" to authorise, and confirming your SSH key before it is added to the server.
 
