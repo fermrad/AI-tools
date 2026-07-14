@@ -7,7 +7,8 @@ name: Build ferm-setup
 #   - Pushing a tag matching ferm-setup/v* (e.g. ferm-setup/v1.0.0) → creates a release
 #   - Manual dispatch                                                  → uploads to a draft release
 #
-# No secrets required. The tool uses the user's local `gh` CLI session at runtime.
+# Required secrets:
+#   FERM_SETUP_OAUTH_CLIENT_ID — GitHub OAuth App Client ID (org secret)
 
 on:
   push:
@@ -56,6 +57,21 @@ jobs:
           cache: true
           cache-dependency-path: claude/setup-tool/go.mod
 
+      - name: Bundle skills into binary
+        # Copies the skills from this exact git commit into bundled/skills/
+        # so each release ships a versioned snapshot of the skills.
+        run: |
+          mkdir -p claude/setup-tool/bundled/skills
+          for dir in claude/skills/*/; do
+            name=$(basename "$dir")
+            [[ "$name" == .* ]] && continue
+            [ -f "${dir}SKILL.md" ] || continue
+            mkdir -p "claude/setup-tool/bundled/skills/${name}"
+            cp "${dir}SKILL.md" "claude/setup-tool/bundled/skills/${name}/SKILL.md"
+          done
+          echo "Bundled skills:"
+          find claude/setup-tool/bundled/skills -name "SKILL.md" | sort
+
       - name: Download dependencies
         working-directory: claude/setup-tool
         run: go mod tidy && go mod download
@@ -66,9 +82,12 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
+          OAUTH_CLIENT_ID: ${{ secrets.FERM_SETUP_OAUTH_CLIENT_ID }}
         run: |
           BINARY="ferm-setup-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}"
-          go build -ldflags="-s -w" -o "$BINARY" .
+          go build \
+            -ldflags="-s -w -X main.githubClientID=${OAUTH_CLIENT_ID}" \
+            -o "$BINARY" .
           echo "BINARY=$BINARY" >> $GITHUB_ENV
 
       - name: Package (zip with executable bit)
@@ -128,7 +147,7 @@ jobs:
 
             One-command developer setup tool for the Fermrad org.
 
-            **Prerequisite:** [GitHub CLI](https://cli.github.com) installed and logged in (`gh auth login`).
+            No prerequisites — just download and run.
 
             ### Download
 

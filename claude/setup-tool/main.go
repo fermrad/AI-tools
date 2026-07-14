@@ -1,21 +1,24 @@
 // ferm-setup provisions a new Fermrad developer's machine and server access.
-//
-// Opens a browser UI showing live progress. Requires:
-//   - GitHub CLI (gh) installed and authenticated: https://cli.github.com
+// It is self-contained — no prerequisites beyond the binary itself.
+// Authentication uses GitHub OAuth with PKCE (no client secret required).
 package main
 
 import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"embed"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -27,6 +30,12 @@ import (
 
 	"golang.org/x/crypto/ssh"
 )
+
+//go:embed bundled/skills
+var bundledSkills embed.FS
+
+// githubClientID is the OAuth App Client ID, injected at build time via -ldflags.
+var githubClientID = "PLACEHOLDER_OAUTH_CLIENT_ID"
 
 const (
 	fermradOrg        = "fermrad"
@@ -58,6 +67,15 @@ const uiHTML = `<!DOCTYPE html>
     .ok .icon{color:#16a34a}
     .err .icon,.err .text{color:#dc2626}
     .dim .icon,.dim .text{color:#6b7280}
+    .auth-box{margin-top:10px;padding:20px;background:#f0f9ff;
+              border:1px solid #bae6fd;border-radius:8px}
+    .auth-box p{font-size:.875rem;color:#0369a1;margin-bottom:14px}
+    .gh-btn{display:inline-flex;align-items:center;gap:8px;background:#0f172a;
+            color:#fff;border:none;border-radius:6px;padding:9px 18px;
+            font-size:.875rem;font-weight:500;cursor:pointer;text-decoration:none}
+    .gh-btn:hover{background:#1e293b}
+    .gh-btn:disabled{background:#94a3b8;cursor:default}
+    .waiting{margin-top:12px;font-size:.8rem;color:#6b7280}
     .confirm{margin-top:20px;padding:16px;background:#f8fafc;
              border:1px solid #e2e8f0;border-radius:8px}
     .confirm p{font-size:.85rem;color:#64748b;margin-bottom:10px}
@@ -100,6 +118,21 @@ es.onmessage = e => {
     d.className = 'step err';
     d.innerHTML = '<span class="icon">✗</span><span class="text">'+ev.text+'</span>';
     root.appendChild(d);
+  } else if (ev.type === 'auth') {
+    d.className = 'auth-box';
+    const btn = document.createElement('a');
+    btn.className = 'gh-btn';
+    btn.href = ev.url;
+    btn.target = '_blank';
+    btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg> Connect with GitHub';
+    btn.onclick = () => { btn.style.pointerEvents='none'; btn.style.opacity='.6'; };
+    d.innerHTML = '<p>Click below to authorise with GitHub. A new tab will open — you will be returned here automatically.</p>';
+    d.appendChild(btn);
+    const w = document.createElement('p');
+    w.className = 'waiting';
+    w.innerHTML = '<span class="spin">⟳</span> Waiting for authorisation…';
+    d.appendChild(w);
+    root.appendChild(d);
   } else if (ev.type === 'link') {
     d.className = 'link-row';
     d.innerHTML = '<a href="'+ev.url+'" target="_blank">↗ '+ev.text+'</a>';
@@ -126,6 +159,50 @@ es.onmessage = e => {
 </script>
 </body>
 </html>`
+
+// callbackHTML is shown in the GitHub OAuth tab after the user authorises.
+const callbackHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Authorised</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+         display:flex;justify-content:center;align-items:center;
+         height:100vh;margin:0;background:#f8fafc}
+    .box{text-align:center;color:#166534}
+    .check{font-size:3rem;margin-bottom:16px}
+    p{font-size:1rem;font-weight:500}
+    small{color:#6b7280;font-size:.85rem;display:block;margin-top:8px}
+  </style>
+</head>
+<body>
+<div class="box">
+  <div class="check">✓</div>
+  <p>GitHub connected</p>
+  <small>You can close this tab and return to the setup window.</small>
+</div>
+</body>
+</html>`
+
+// ── PKCE helpers ──────────────────────────────────────────────────────────────
+
+func pkceVerifier() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func pkceChallenge(verifier string) string {
+	h := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(h[:])
+}
+
+func randomState() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return fmt.Sprintf("%x", b)
+}
 
 // ── Event bus ─────────────────────────────────────────────────────────────────
 
@@ -180,16 +257,17 @@ func (b *eventBus) unsubscribe(id int) {
 
 type prog struct{ b *eventBus }
 
-func (p *prog) running(text string)           { p.b.publish(Event{Type: "running", Text: text}) }
-func (p *prog) ok(text string)                { p.b.publish(Event{Type: "ok", Text: text}) }
-func (p *prog) fail(text string)              { p.b.publish(Event{Type: "error", Text: text}) }
-func (p *prog) link(text, url string)         { p.b.publish(Event{Type: "link", Text: text, URL: url}) }
-func (p *prog) confirm(pubKey string)         { p.b.publish(Event{Type: "confirm", Text: pubKey}) }
-func (p *prog) done()                         { p.b.publish(Event{Type: "done"}) }
+func (p *prog) running(text string)   { p.b.publish(Event{Type: "running", Text: text}) }
+func (p *prog) ok(text string)        { p.b.publish(Event{Type: "ok", Text: text}) }
+func (p *prog) fail(text string)      { p.b.publish(Event{Type: "error", Text: text}) }
+func (p *prog) link(text, u string)   { p.b.publish(Event{Type: "link", Text: text, URL: u}) }
+func (p *prog) auth(authURL string)   { p.b.publish(Event{Type: "auth", URL: authURL}) }
+func (p *prog) confirm(pubKey string) { p.b.publish(Event{Type: "confirm", Text: pubKey}) }
+func (p *prog) done()                 { p.b.publish(Event{Type: "done"}) }
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
 
-func newHandler(b *eventBus, confirmCh chan<- struct{}) http.Handler {
+func newHandler(b *eventBus, confirmCh chan<- struct{}, authCodeCh chan<- string) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -234,6 +312,21 @@ func newHandler(b *eventBus, confirmCh chan<- struct{}) http.Handler {
 		}
 	})
 
+	// GitHub redirects here after the user authorises.
+	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			http.Error(w, "missing authorization code", http.StatusBadRequest)
+			return
+		}
+		select {
+		case authCodeCh <- code:
+		default:
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(callbackHTML))
+	})
+
 	mux.HandleFunc("/confirm", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -251,15 +344,15 @@ func newHandler(b *eventBus, confirmCh chan<- struct{}) http.Handler {
 
 // ── Browser launcher ──────────────────────────────────────────────────────────
 
-func openBrowser(url string) {
+func openBrowser(u string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		cmd = exec.Command("open", u)
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", u)
 	default:
-		cmd = exec.Command("xdg-open", url)
+		cmd = exec.Command("xdg-open", u)
 	}
 	cmd.Start()
 }
@@ -302,30 +395,66 @@ func apiPost(token, path string, payload interface{}) (int, []byte, error) {
 	return resp.StatusCode, body, nil
 }
 
-// ── Auth via gh CLI ───────────────────────────────────────────────────────────
+// ── GitHub OAuth (PKCE, no client secret) ────────────────────────────────────
 
-func authenticate() (token, username string, err error) {
-	if _, err := exec.LookPath("gh"); err != nil {
-		return "", "", fmt.Errorf(
-			"GitHub CLI (gh) is not installed.\n" +
-				"Install it from https://cli.github.com, then run: gh auth login",
-		)
-	}
+func authenticate(p *prog, authCodeCh <-chan string, port int) (token, username string, err error) {
+	verifier := pkceVerifier()
+	challenge := pkceChallenge(verifier)
+	redirectURI := fmt.Sprintf("http://localhost:%d/callback", port)
 
-	out, err := exec.Command("gh", "auth", "token").Output()
-	if err != nil || strings.TrimSpace(string(out)) == "" {
-		return "", "", fmt.Errorf(
-			"not logged in to GitHub CLI.\n" +
-				"Run: gh auth login",
-		)
+	authURL := "https://github.com/login/oauth/authorize?" + url.Values{
+		"client_id":             {githubClientID},
+		"scope":                 {"read:org repo"},
+		"redirect_uri":          {redirectURI},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"state":                 {randomState()},
+	}.Encode()
+
+	// Show "Connect with GitHub" button in the browser UI
+	p.auth(authURL)
+
+	// Wait for the user to authorise — the /callback handler delivers the code
+	code := <-authCodeCh
+
+	// Exchange code + PKCE verifier for access token (no client secret needed)
+	resp, err := http.PostForm("https://github.com/login/oauth/access_token", url.Values{
+		"client_id":     {githubClientID},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+		"code_verifier": {verifier},
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("exchanging token: %w", err)
 	}
-	token = strings.TrimSpace(string(out))
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	// GitHub returns form-encoded by default
+	vals, _ := url.ParseQuery(string(body))
+	token = vals.Get("access_token")
+	if token == "" {
+		// Try JSON
+		var tr struct {
+			AccessToken string `json:"access_token"`
+			Error       string `json:"error"`
+			ErrorDesc   string `json:"error_description"`
+		}
+		json.Unmarshal(body, &tr)
+		if tr.Error != "" {
+			return "", "", fmt.Errorf("token exchange failed: %s — %s", tr.Error, tr.ErrorDesc)
+		}
+		token = tr.AccessToken
+	}
+	if token == "" {
+		return "", "", fmt.Errorf("no access_token in response: %s", body)
+	}
 
 	var user struct {
 		Login string `json:"login"`
 	}
 	if err := apiGet(token, "/user", &user); err != nil {
-		return "", "", fmt.Errorf("fetching GitHub user: %w", err)
+		return "", "", fmt.Errorf("fetching user: %w", err)
 	}
 	return token, user.Login, nil
 }
@@ -478,12 +607,15 @@ func writeSSHConfig(username, privPath string) (alreadySet bool, err error) {
 
 // ── Claude skills installation ────────────────────────────────────────────────
 
-// installSkills downloads every SKILL.md from claude/skills/ in the AI-tools
-// repo and writes it to both locations Claude Code reads from:
-//   ~/.claude/skills/<name>/SKILL.md  — skills API (directory format)
-//   ~/.claude/commands/<name>.md      — commands API (flat-file format)
-// Existing files are overwritten, so re-running always installs the latest.
-func installSkills(token string) (int, error) {
+// installSkills writes the skills bundled into the binary to both locations
+// Claude Code reads from:
+//
+//	~/.claude/skills/<name>/SKILL.md  — skills API (directory format)
+//	~/.claude/commands/<name>.md      — commands API (flat-file format)
+//
+// Skills are embedded at build time from bundled/skills/, so each release
+// ships a versioned snapshot. Existing files are overwritten.
+func installSkills() (int, error) {
 	home, _ := os.UserHomeDir()
 	skillsDst := filepath.Join(home, ".claude", "skills")
 	commandsDst := filepath.Join(home, ".claude", "commands")
@@ -493,46 +625,34 @@ func installSkills(token string) (int, error) {
 		}
 	}
 
-	var entries []struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
-	}
-	if err := apiGet(token, fmt.Sprintf("/repos/%s/contents/claude/skills", aiToolsRepo), &entries); err != nil {
-		return 0, fmt.Errorf("listing skills: %w", err)
+	entries, err := fs.ReadDir(bundledSkills, "bundled/skills")
+	if err != nil {
+		return 0, fmt.Errorf("reading bundled skills: %w", err)
 	}
 
 	installed := 0
 	for _, e := range entries {
-		if e.Type != "dir" || strings.HasPrefix(e.Name, ".") {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		var file struct {
-			Content string `json:"content"` // base64-encoded by GitHub API
-		}
-		path := fmt.Sprintf("/repos/%s/contents/claude/skills/%s/SKILL.md", aiToolsRepo, e.Name)
-		if err := apiGet(token, path, &file); err != nil {
-			continue // no SKILL.md in this dir, skip
-		}
-		content, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(file.Content, "\n", ""))
+		content, err := bundledSkills.ReadFile("bundled/skills/" + e.Name() + "/SKILL.md")
 		if err != nil {
 			continue
 		}
-		// ~/.claude/skills/<name>/SKILL.md
-		skillDir := filepath.Join(skillsDst, e.Name)
+		skillDir := filepath.Join(skillsDst, e.Name())
 		if err := os.MkdirAll(skillDir, 0755); err != nil {
 			return installed, err
 		}
 		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), content, 0644); err != nil {
-			return installed, fmt.Errorf("writing skills/%s: %w", e.Name, err)
+			return installed, fmt.Errorf("writing skills/%s: %w", e.Name(), err)
 		}
-		// ~/.claude/commands/<name>.md
-		if err := os.WriteFile(filepath.Join(commandsDst, e.Name+".md"), content, 0644); err != nil {
-			return installed, fmt.Errorf("writing commands/%s: %w", e.Name, err)
+		if err := os.WriteFile(filepath.Join(commandsDst, e.Name()+".md"), content, 0644); err != nil {
+			return installed, fmt.Errorf("writing commands/%s: %w", e.Name(), err)
 		}
 		installed++
 	}
 	if installed == 0 {
-		return 0, fmt.Errorf("no skills found in %s/claude/skills", aiToolsRepo)
+		return 0, fmt.Errorf("no skills bundled in binary")
 	}
 	return installed, nil
 }
@@ -572,10 +692,10 @@ func triggerProvisioning(token, username, pubKey string) (runURL string, err err
 
 // ── Setup flow ────────────────────────────────────────────────────────────────
 
-func runSetup(p *prog, confirmCh <-chan struct{}) {
-	// 1. Auth
-	p.running("Authenticating with GitHub…")
-	token, username, err := authenticate()
+func runSetup(p *prog, confirmCh <-chan struct{}, authCodeCh <-chan string, port int) {
+	// 1. Auth — shows button in browser, waits for OAuth callback
+	p.running("Waiting for GitHub authorisation…")
+	token, username, err := authenticate(p, authCodeCh, port)
 	if err != nil {
 		p.fail(err.Error())
 		return
@@ -618,7 +738,7 @@ func runSetup(p *prog, confirmCh <-chan struct{}) {
 
 	// 5. Skills
 	p.running("Installing Claude Code skills…")
-	n, err := installSkills(token)
+	n, err := installSkills()
 	if err != nil {
 		p.fail("Skills: " + err.Error())
 		return
@@ -645,8 +765,14 @@ func runSetup(p *prog, confirmCh <-chan struct{}) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
+	if githubClientID == "PLACEHOLDER_OAUTH_CLIENT_ID" {
+		fmt.Fprintln(os.Stderr, "Error: binary built without OAuth Client ID (developer build only).")
+		os.Exit(1)
+	}
+
 	b := newEventBus()
 	confirmCh := make(chan struct{}, 1)
+	authCodeCh := make(chan string, 1)
 
 	l, err := net.Listen("tcp", ":0")
 	if err != nil {
@@ -656,7 +782,7 @@ func main() {
 	port := l.Addr().(*net.TCPAddr).Port
 	addr := fmt.Sprintf("http://localhost:%d", port)
 
-	srv := &http.Server{Handler: newHandler(b, confirmCh)}
+	srv := &http.Server{Handler: newHandler(b, confirmCh, authCodeCh)}
 	go srv.Serve(l)
 
 	time.Sleep(50 * time.Millisecond)
@@ -664,7 +790,7 @@ func main() {
 	openBrowser(addr)
 
 	p := &prog{b: b}
-	go runSetup(p, confirmCh)
+	go runSetup(p, confirmCh, authCodeCh, port)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt)
