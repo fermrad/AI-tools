@@ -1,15 +1,13 @@
 // ferm-setup provisions a new Fermrad developer's machine and server access.
 // It is self-contained — no prerequisites beyond the binary itself.
-// Authentication uses GitHub OAuth with PKCE (no client secret required).
+// Authentication uses GitHub OAuth web flow with a callback to localhost.
 package main
 
 import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"embed"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
@@ -34,8 +32,12 @@ import (
 //go:embed bundled/skills
 var bundledSkills embed.FS
 
-// githubClientID is the OAuth App Client ID, injected at build time via -ldflags.
-var githubClientID = "PLACEHOLDER_OAUTH_CLIENT_ID"
+// githubClientID and githubClientSecret are injected at build time via -ldflags.
+// The secret is intentionally baked into the binary — it only lets you exchange
+// a short-lived auth code that requires active user consent, so the risk of
+// extraction is negligible for an internal org tool.
+var githubClientID     = "PLACEHOLDER_OAUTH_CLIENT_ID"
+var githubClientSecret = "PLACEHOLDER_OAUTH_CLIENT_SECRET"
 
 const (
 	fermradOrg        = "fermrad"
@@ -184,19 +186,6 @@ const callbackHTML = `<!DOCTYPE html>
 </div>
 </body>
 </html>`
-
-// ── PKCE helpers ──────────────────────────────────────────────────────────────
-
-func pkceVerifier() string {
-	b := make([]byte, 32)
-	rand.Read(b)
-	return base64.RawURLEncoding.EncodeToString(b)
-}
-
-func pkceChallenge(verifier string) string {
-	h := sha256.Sum256([]byte(verifier))
-	return base64.RawURLEncoding.EncodeToString(h[:])
-}
 
 func randomState() string {
 	b := make([]byte, 16)
@@ -398,17 +387,13 @@ func apiPost(token, path string, payload interface{}) (int, []byte, error) {
 // ── GitHub OAuth (PKCE, no client secret) ────────────────────────────────────
 
 func authenticate(p *prog, authCodeCh <-chan string, port int) (token, username string, err error) {
-	verifier := pkceVerifier()
-	challenge := pkceChallenge(verifier)
 	redirectURI := fmt.Sprintf("http://localhost:%d/callback", port)
 
 	authURL := "https://github.com/login/oauth/authorize?" + url.Values{
-		"client_id":             {githubClientID},
-		"scope":                 {"read:org repo"},
-		"redirect_uri":          {redirectURI},
-		"code_challenge":        {challenge},
-		"code_challenge_method": {"S256"},
-		"state":                 {randomState()},
+		"client_id":    {githubClientID},
+		"scope":        {"read:org repo"},
+		"redirect_uri": {redirectURI},
+		"state":        {randomState()},
 	}.Encode()
 
 	// Show "Connect with GitHub" button in the browser UI
@@ -417,12 +402,12 @@ func authenticate(p *prog, authCodeCh <-chan string, port int) (token, username 
 	// Wait for the user to authorise — the /callback handler delivers the code
 	code := <-authCodeCh
 
-	// Exchange code + PKCE verifier for access token (no client secret needed)
+	// Exchange code for access token
 	resp, err := http.PostForm("https://github.com/login/oauth/access_token", url.Values{
 		"client_id":     {githubClientID},
+		"client_secret": {githubClientSecret},
 		"code":          {code},
 		"redirect_uri":  {redirectURI},
-		"code_verifier": {verifier},
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("exchanging token: %w", err)
@@ -765,8 +750,8 @@ func runSetup(p *prog, confirmCh <-chan struct{}, authCodeCh <-chan string, port
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
-	if githubClientID == "PLACEHOLDER_OAUTH_CLIENT_ID" {
-		fmt.Fprintln(os.Stderr, "Error: binary built without OAuth Client ID (developer build only).")
+	if githubClientID == "PLACEHOLDER_OAUTH_CLIENT_ID" || githubClientSecret == "PLACEHOLDER_OAUTH_CLIENT_SECRET" {
+		fmt.Fprintln(os.Stderr, "Error: binary built without OAuth credentials (developer build only).")
 		os.Exit(1)
 	}
 

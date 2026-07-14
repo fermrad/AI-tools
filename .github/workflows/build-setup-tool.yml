@@ -12,7 +12,8 @@ name: Build ferm-setup
 #   workflow_dispatch                — manual trigger (uses VERSION from checked-out branch)
 #
 # Required secrets:
-#   FERM_SETUP_OAUTH_CLIENT_ID — GitHub OAuth App Client ID (org secret)
+#   FERM_SETUP_OAUTH_CLIENT_ID     — GitHub OAuth App Client ID (org secret)
+#   FERM_SETUP_OAUTH_CLIENT_SECRET — GitHub OAuth App Client Secret (org secret)
 
 on:
   push:
@@ -90,10 +91,11 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
           OAUTH_CLIENT_ID: ${{ secrets.FERM_SETUP_OAUTH_CLIENT_ID }}
+          OAUTH_CLIENT_SECRET: ${{ secrets.FERM_SETUP_OAUTH_CLIENT_SECRET }}
         run: |
           BINARY="ferm-setup-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}"
           go build \
-            -ldflags="-s -w -X main.githubClientID=${OAUTH_CLIENT_ID}" \
+            -ldflags="-s -w -X main.githubClientID=${OAUTH_CLIENT_ID} -X main.githubClientSecret=${OAUTH_CLIENT_SECRET}" \
             -o "$BINARY" .
           echo "BINARY=$BINARY" >> $GITHUB_ENV
 
