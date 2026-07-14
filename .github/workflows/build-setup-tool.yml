@@ -1,25 +1,28 @@
 name: Build ferm-setup
 
-# Builds cross-platform binaries for the ferm-setup CLI tool and uploads them
-# as GitHub Release assets.
+# Builds cross-platform binaries and publishes GitHub releases.
 #
-# Triggers:
-#   - Pushing a tag matching ferm-setup/v* (e.g. ferm-setup/v1.0.0) → creates a release
-#   - Manual dispatch                                                  → uploads to a draft release
+# Beta (automatic):
+#   Triggered whenever anything under claude/ merges to main.
+#   Creates/overwrites the rolling "ferm-setup/beta" pre-release.
+#
+# Stable (manual):
+#   Run workflow_dispatch from main with a version (e.g. v1.2.0).
+#   Creates a permanent "ferm-setup/v1.2.0" release.
 #
 # Required secrets:
 #   FERM_SETUP_OAUTH_CLIENT_ID — GitHub OAuth App Client ID (org secret)
 
 on:
   push:
-    tags:
-      - "ferm-setup/v*"
+    branches: [main]
+    paths: ["claude/**"]
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Release tag (e.g. ferm-setup/v1.0.0) — used only for the draft release name"
-        required: false
-        default: "ferm-setup/v0.0.0-dev"
+      version:
+        description: "Version for stable release (e.g. v1.2.0)"
+        required: true
+        type: string
 
 jobs:
   build:
@@ -57,9 +60,10 @@ jobs:
           cache: true
           cache-dependency-path: claude/setup-tool/go.mod
 
-      - name: Bundle skills into binary
-        # Copies the skills from this exact git commit into bundled/skills/
-        # so each release ships a versioned snapshot of the skills.
+      - name: Bundle skills
+        # Copies claude/skills/*/SKILL.md into the setup-tool's bundled/ dir
+        # so //go:embed picks them up. Each release captures the exact skills
+        # at this commit.
         run: |
           mkdir -p claude/setup-tool/bundled/skills
           for dir in claude/skills/*/; do
@@ -90,7 +94,7 @@ jobs:
             -o "$BINARY" .
           echo "BINARY=$BINARY" >> $GITHUB_ENV
 
-      - name: Package (zip with executable bit)
+      - name: Package (zip preserves executable bit on macOS/Linux)
         working-directory: claude/setup-tool
         run: |
           if [ "${{ matrix.zip }}" = "true" ]; then
@@ -109,23 +113,35 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Create Release
+    name: Publish release
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Determine tag
-        id: tag
+      - uses: actions/checkout@v4
+
+      - name: Set release metadata
+        id: meta
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-            echo "draft=false" >> $GITHUB_OUTPUT
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=ferm-setup/${{ inputs.version }}"    >> $GITHUB_OUTPUT
+            echo "name=ferm-setup ${{ inputs.version }}"   >> $GITHUB_OUTPUT
+            echo "prerelease=false"                         >> $GITHUB_OUTPUT
           else
-            echo "name=${{ inputs.tag }}" >> $GITHUB_OUTPUT
-            echo "draft=true" >> $GITHUB_OUTPUT
+            echo "tag=ferm-setup/beta"                      >> $GITHUB_OUTPUT
+            echo "name=ferm-setup (beta)"                   >> $GITHUB_OUTPUT
+            echo "prerelease=true"                          >> $GITHUB_OUTPUT
           fi
+
+      - name: Move beta tag to current commit
+        if: github.event_name == 'push'
+        run: |
+          git config user.email "github-actions@github.com"
+          git config user.name "github-actions"
+          git tag -f ferm-setup/beta
+          git push --force origin ferm-setup/beta
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -133,21 +149,17 @@ jobs:
           path: dist/
           merge-multiple: true
 
-      - name: List artifacts
-        run: ls -lh dist/
-
-      - name: Create Release
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.name }}
-          name: "ferm-setup ${{ steps.tag.outputs.name }}"
-          draft: ${{ steps.tag.outputs.draft }}
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          files: dist/*
           body: |
             ## ferm-setup
 
-            One-command developer setup tool for the Fermrad org.
-
-            No prerequisites — just download and run.
+            One-command developer setup tool for the Fermrad org. No prerequisites — just download and run.
 
             ### Download
 
@@ -163,4 +175,3 @@ jobs:
             **macOS / Linux:** Download the `.zip`, double-click to extract, then right-click the binary → Open.
 
             **Windows:** Download the `.exe` and double-click to run.
-          files: dist/*
