@@ -14,6 +14,10 @@ Centralised repository for AI tool configurations, system prompts, and GitHub Ac
 
 ## Usage
 
+### Developer setup tool
+
+[`claude/setup-tool/`](./claude/setup-tool/) — **ferm-setup**, a self-contained binary that provisions a new Fermrad developer's machine and server access in one step. See the [setup-tool README](./claude/setup-tool/README.md) for download links and usage.
+
 ### Claude Code workflows
 
 The `claude/github-actions/` folder contains reusable GitHub Actions workflows and Python scripts that use the Claude API:
