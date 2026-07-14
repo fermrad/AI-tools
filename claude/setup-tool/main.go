@@ -1,15 +1,13 @@
 // ferm-setup provisions a new Fermrad developer's machine and server access.
 // It is self-contained — no prerequisites beyond the binary itself.
-// Authentication uses GitHub OAuth with PKCE (no client secret required).
+// Authentication uses GitHub Device Flow (no client secret required).
 package main
 
 import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"embed"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
@@ -24,6 +22,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,7 +33,9 @@ import (
 //go:embed bundled/skills
 var bundledSkills embed.FS
 
-// githubClientID is the OAuth App Client ID, injected at build time via -ldflags.
+// githubClientID is injected at build time via -ldflags.
+// Device Flow requires no client secret — the client_id alone is enough,
+// and GitHub explicitly designed this flow for native apps and CLIs.
 var githubClientID = "PLACEHOLDER_OAUTH_CLIENT_ID"
 
 const (
@@ -70,11 +71,12 @@ const uiHTML = `<!DOCTYPE html>
     .auth-box{margin-top:10px;padding:20px;background:#f0f9ff;
               border:1px solid #bae6fd;border-radius:8px}
     .auth-box p{font-size:.875rem;color:#0369a1;margin-bottom:14px}
-    .gh-btn{display:inline-flex;align-items:center;gap:8px;background:#0f172a;
-            color:#fff;border:none;border-radius:6px;padding:9px 18px;
-            font-size:.875rem;font-weight:500;cursor:pointer;text-decoration:none}
-    .gh-btn:hover{background:#1e293b}
-    .gh-btn:disabled{background:#94a3b8;cursor:default}
+    .user-code{font-family:'SF Mono',Monaco,monospace;font-size:2rem;
+               font-weight:700;letter-spacing:.2em;color:#0f172a;
+               text-align:center;padding:16px 0}
+    .gh-link{display:inline-block;color:#2563eb;font-size:.875rem;
+             text-decoration:none;margin-top:4px}
+    .gh-link:hover{text-decoration:underline}
     .waiting{margin-top:12px;font-size:.8rem;color:#6b7280}
     .confirm{margin-top:20px;padding:16px;background:#f8fafc;
              border:1px solid #e2e8f0;border-radius:8px}
@@ -120,19 +122,13 @@ es.onmessage = e => {
     root.appendChild(d);
   } else if (ev.type === 'auth') {
     d.className = 'auth-box';
-    const btn = document.createElement('a');
-    btn.className = 'gh-btn';
-    btn.href = ev.url;
-    btn.target = '_blank';
-    btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg> Connect with GitHub';
-    btn.onclick = () => { btn.style.pointerEvents='none'; btn.style.opacity='.6'; };
-    d.innerHTML = '<p>Click below to authorise with GitHub. A new tab will open — you will be returned here automatically.</p>';
-    d.appendChild(btn);
-    const w = document.createElement('p');
-    w.className = 'waiting';
-    w.innerHTML = '<span class="spin">⟳</span> Waiting for authorisation…';
-    d.appendChild(w);
+    d.innerHTML =
+      '<p>A GitHub tab has opened. Enter this code to authorise:</p>' +
+      '<div class="user-code">'+ev.text+'</div>' +
+      '<a class="gh-link" href="'+ev.url+'" target="_blank">'+ev.url+' ↗</a>' +
+      '<p class="waiting"><span class="spin">⟳</span> Waiting for authorisation…</p>';
     root.appendChild(d);
+    window.open(ev.url, '_blank');
   } else if (ev.type === 'link') {
     d.className = 'link-row';
     d.innerHTML = '<a href="'+ev.url+'" target="_blank">↗ '+ev.text+'</a>';
@@ -160,49 +156,6 @@ es.onmessage = e => {
 </body>
 </html>`
 
-// callbackHTML is shown in the GitHub OAuth tab after the user authorises.
-const callbackHTML = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Authorised</title>
-  <style>
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-         display:flex;justify-content:center;align-items:center;
-         height:100vh;margin:0;background:#f8fafc}
-    .box{text-align:center;color:#166534}
-    .check{font-size:3rem;margin-bottom:16px}
-    p{font-size:1rem;font-weight:500}
-    small{color:#6b7280;font-size:.85rem;display:block;margin-top:8px}
-  </style>
-</head>
-<body>
-<div class="box">
-  <div class="check">✓</div>
-  <p>GitHub connected</p>
-  <small>You can close this tab and return to the setup window.</small>
-</div>
-</body>
-</html>`
-
-// ── PKCE helpers ──────────────────────────────────────────────────────────────
-
-func pkceVerifier() string {
-	b := make([]byte, 32)
-	rand.Read(b)
-	return base64.RawURLEncoding.EncodeToString(b)
-}
-
-func pkceChallenge(verifier string) string {
-	h := sha256.Sum256([]byte(verifier))
-	return base64.RawURLEncoding.EncodeToString(h[:])
-}
-
-func randomState() string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)
-}
 
 // ── Event bus ─────────────────────────────────────────────────────────────────
 
@@ -261,13 +214,15 @@ func (p *prog) running(text string)   { p.b.publish(Event{Type: "running", Text:
 func (p *prog) ok(text string)        { p.b.publish(Event{Type: "ok", Text: text}) }
 func (p *prog) fail(text string)      { p.b.publish(Event{Type: "error", Text: text}) }
 func (p *prog) link(text, u string)   { p.b.publish(Event{Type: "link", Text: text, URL: u}) }
-func (p *prog) auth(authURL string)   { p.b.publish(Event{Type: "auth", URL: authURL}) }
+func (p *prog) auth(userCode, url string) {
+	p.b.publish(Event{Type: "auth", Text: userCode, URL: url})
+}
 func (p *prog) confirm(pubKey string) { p.b.publish(Event{Type: "confirm", Text: pubKey}) }
 func (p *prog) done()                 { p.b.publish(Event{Type: "done"}) }
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
 
-func newHandler(b *eventBus, confirmCh chan<- struct{}, authCodeCh chan<- string) http.Handler {
+func newHandler(b *eventBus, confirmCh chan<- struct{}) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -310,21 +265,6 @@ func newHandler(b *eventBus, confirmCh chan<- struct{}, authCodeCh chan<- string
 				send(e)
 			}
 		}
-	})
-
-	// GitHub redirects here after the user authorises.
-	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			http.Error(w, "missing authorization code", http.StatusBadRequest)
-			return
-		}
-		select {
-		case authCodeCh <- code:
-		default:
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(callbackHTML))
 	})
 
 	mux.HandleFunc("/confirm", func(w http.ResponseWriter, r *http.Request) {
@@ -395,59 +335,69 @@ func apiPost(token, path string, payload interface{}) (int, []byte, error) {
 	return resp.StatusCode, body, nil
 }
 
-// ── GitHub OAuth (PKCE, no client secret) ────────────────────────────────────
+// ── GitHub Device Flow auth ───────────────────────────────────────────────────
 
-func authenticate(p *prog, authCodeCh <-chan string, port int) (token, username string, err error) {
-	verifier := pkceVerifier()
-	challenge := pkceChallenge(verifier)
-	redirectURI := fmt.Sprintf("http://localhost:%d/callback", port)
-
-	authURL := "https://github.com/login/oauth/authorize?" + url.Values{
-		"client_id":             {githubClientID},
-		"scope":                 {"read:org repo"},
-		"redirect_uri":          {redirectURI},
-		"code_challenge":        {challenge},
-		"code_challenge_method": {"S256"},
-		"state":                 {randomState()},
-	}.Encode()
-
-	// Show "Connect with GitHub" button in the browser UI
-	p.auth(authURL)
-
-	// Wait for the user to authorise — the /callback handler delivers the code
-	code := <-authCodeCh
-
-	// Exchange code + PKCE verifier for access token (no client secret needed)
-	resp, err := http.PostForm("https://github.com/login/oauth/access_token", url.Values{
-		"client_id":     {githubClientID},
-		"code":          {code},
-		"redirect_uri":  {redirectURI},
-		"code_verifier": {verifier},
+func authenticate(p *prog) (token, username string, err error) {
+	// Step 1: request a device code
+	resp, err := http.PostForm("https://github.com/login/device/code", url.Values{
+		"client_id": {githubClientID},
+		"scope":     {"read:org repo"},
 	})
 	if err != nil {
-		return "", "", fmt.Errorf("exchanging token: %w", err)
+		return "", "", fmt.Errorf("requesting device code: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
-	// GitHub returns form-encoded by default
 	vals, _ := url.ParseQuery(string(body))
-	token = vals.Get("access_token")
-	if token == "" {
-		// Try JSON
-		var tr struct {
-			AccessToken string `json:"access_token"`
-			Error       string `json:"error"`
-			ErrorDesc   string `json:"error_description"`
-		}
-		json.Unmarshal(body, &tr)
-		if tr.Error != "" {
-			return "", "", fmt.Errorf("token exchange failed: %s — %s", tr.Error, tr.ErrorDesc)
-		}
-		token = tr.AccessToken
+	deviceCode := vals.Get("device_code")
+	userCode   := vals.Get("user_code")
+	verifyURI  := vals.Get("verification_uri")
+	interval   := 5
+	if v, err := strconv.Atoi(vals.Get("interval")); err == nil && v > 0 {
+		interval = v
 	}
-	if token == "" {
-		return "", "", fmt.Errorf("no access_token in response: %s", body)
+	if deviceCode == "" {
+		return "", "", fmt.Errorf("no device_code in response: %s", body)
+	}
+
+	// Show code in browser UI and auto-open GitHub
+	p.auth(userCode, verifyURI)
+
+	// Step 2: poll until the user authorises
+	for {
+		time.Sleep(time.Duration(interval) * time.Second)
+
+		r, err := http.PostForm("https://github.com/login/oauth/access_token", url.Values{
+			"client_id":   {githubClientID},
+			"device_code": {deviceCode},
+			"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
+		})
+		if err != nil {
+			continue
+		}
+		b, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+
+		v, _ := url.ParseQuery(string(b))
+		if t := v.Get("access_token"); t != "" {
+			token = t
+			break
+		}
+		switch v.Get("error") {
+		case "authorization_pending":
+			// keep polling
+		case "slow_down":
+			interval += 5
+		case "expired_token":
+			return "", "", fmt.Errorf("code expired — please restart")
+		case "access_denied":
+			return "", "", fmt.Errorf("authorisation denied")
+		default:
+			if e := v.Get("error"); e != "" {
+				return "", "", fmt.Errorf("auth error: %s — %s", e, v.Get("error_description"))
+			}
+		}
 	}
 
 	var user struct {
@@ -692,10 +642,9 @@ func triggerProvisioning(token, username, pubKey string) (runURL string, err err
 
 // ── Setup flow ────────────────────────────────────────────────────────────────
 
-func runSetup(p *prog, confirmCh <-chan struct{}, authCodeCh <-chan string, port int) {
-	// 1. Auth — shows button in browser, waits for OAuth callback
+func runSetup(p *prog, confirmCh <-chan struct{}) {
 	p.running("Waiting for GitHub authorisation…")
-	token, username, err := authenticate(p, authCodeCh, port)
+	token, username, err := authenticate(p)
 	if err != nil {
 		p.fail(err.Error())
 		return
@@ -772,17 +721,15 @@ func main() {
 
 	b := newEventBus()
 	confirmCh := make(chan struct{}, 1)
-	authCodeCh := make(chan string, 1)
 
 	l, err := net.Listen("tcp", ":0")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "could not start server: %v\n", err)
 		os.Exit(1)
 	}
-	port := l.Addr().(*net.TCPAddr).Port
-	addr := fmt.Sprintf("http://localhost:%d", port)
+	addr := fmt.Sprintf("http://localhost:%d", l.Addr().(*net.TCPAddr).Port)
 
-	srv := &http.Server{Handler: newHandler(b, confirmCh, authCodeCh)}
+	srv := &http.Server{Handler: newHandler(b, confirmCh)}
 	go srv.Serve(l)
 
 	time.Sleep(50 * time.Millisecond)
@@ -790,7 +737,7 @@ func main() {
 	openBrowser(addr)
 
 	p := &prog{b: b}
-	go runSetup(p, confirmCh, authCodeCh, port)
+	go runSetup(p, confirmCh)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt)

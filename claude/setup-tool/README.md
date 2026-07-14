@@ -13,22 +13,56 @@ One-command developer setup tool for the Fermrad org. Downloads as a single bina
 
 ## Usage
 
-### Download
+### macOS / Linux — one-liner (recommended)
 
-Go to the [latest release](https://github.com/fermrad/AI-tools/releases/latest) and download the file for your platform:
+Downloading via `curl` bypasses macOS Gatekeeper entirely — no security warnings.
 
-| Platform | File |
-|---|---|
-| macOS (Apple Silicon) | `ferm-setup-darwin-arm64.zip` |
-| macOS (Intel) | `ferm-setup-darwin-amd64.zip` |
-| Linux | `ferm-setup-linux-amd64.zip` |
-| Windows | `ferm-setup-windows-amd64.exe` |
+**macOS Apple Silicon:**
+```bash
+curl -fsSL https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-darwin-arm64.zip -o /tmp/ferm-setup.zip \
+  && unzip -o /tmp/ferm-setup.zip -d /tmp \
+  && /tmp/ferm-setup-darwin-arm64
+```
 
-### Run
+**macOS Intel:**
+```bash
+curl -fsSL https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-darwin-amd64.zip -o /tmp/ferm-setup.zip \
+  && unzip -o /tmp/ferm-setup.zip -d /tmp \
+  && /tmp/ferm-setup-darwin-amd64
+```
 
-**macOS / Linux:** Unzip, then right-click the binary → Open (to bypass Gatekeeper on macOS).
+**Linux:**
+```bash
+curl -fsSL https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-linux-amd64.zip -o /tmp/ferm-setup.zip \
+  && unzip -o /tmp/ferm-setup.zip -d /tmp \
+  && /tmp/ferm-setup-linux-amd64
+```
 
-**Windows:** Double-click the `.exe`.
+### Windows
+
+Download [`ferm-setup-windows-amd64.exe`](https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-windows-amd64.exe) and double-click to run.
+
+### Manual download (macOS)
+
+If you download the `.zip` via a browser, macOS Gatekeeper will block it the first time. This is a one-time click to allow it:
+
+**Step 1** — Double-click the binary. macOS shows a dialog:
+
+> *"ferm-setup-darwin-arm64" can't be opened because Apple cannot check it for malicious software.*
+
+Click **OK** to dismiss it.
+
+**Step 2** — Open **System Settings** → **Privacy & Security**. Scroll down to the **Security** section. You will see:
+
+> *"ferm-setup-darwin-arm64" was blocked from use because it is not from an identified developer.*
+
+Click **Allow Anyway**. Confirm with Touch ID or your password.
+
+**Step 3** — Double-click the binary again. A new dialog appears:
+
+> *macOS cannot verify the developer of "ferm-setup-darwin-arm64". Are you sure you want to open it?*
+
+Click **Open**. The tool launches and this prompt never appears again for this binary.
 
 A browser window opens showing live progress. The only action required is clicking "Connect with GitHub" to authorise, and confirming your SSH key before it is added to the server.
 
