@@ -13,25 +13,33 @@ One-command developer setup tool for the Fermrad org. Downloads as a single bina
 
 ## Usage
 
-### macOS / Linux — one-liner (recommended)
+### macOS (Apple Silicon)
 
-Downloading via `curl` bypasses macOS Gatekeeper entirely — no security warnings.
+Download: [ferm-setup-darwin-arm64.zip](https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-darwin-arm64.zip)
 
-**macOS Apple Silicon:**
+Or run directly from Terminal — no Gatekeeper warning:
 ```bash
 curl -fsSL https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-darwin-arm64.zip -o /tmp/ferm-setup.zip \
   && unzip -o /tmp/ferm-setup.zip -d /tmp \
   && /tmp/ferm-setup-darwin-arm64
 ```
 
-**macOS Intel:**
+### macOS (Intel)
+
+Download: [ferm-setup-darwin-amd64.zip](https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-darwin-amd64.zip)
+
+Or run directly from Terminal:
 ```bash
 curl -fsSL https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-darwin-amd64.zip -o /tmp/ferm-setup.zip \
   && unzip -o /tmp/ferm-setup.zip -d /tmp \
   && /tmp/ferm-setup-darwin-amd64
 ```
 
-**Linux:**
+### Linux
+
+Download: [ferm-setup-linux-amd64.zip](https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-linux-amd64.zip)
+
+Or run directly from Terminal:
 ```bash
 curl -fsSL https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-linux-amd64.zip -o /tmp/ferm-setup.zip \
   && unzip -o /tmp/ferm-setup.zip -d /tmp \
@@ -40,9 +48,9 @@ curl -fsSL https://github.com/fermrad/AI-tools/releases/latest/download/ferm-set
 
 ### Windows
 
-Download [`ferm-setup-windows-amd64.exe`](https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-windows-amd64.exe) and double-click to run.
+Download: [ferm-setup-windows-amd64.exe](https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-windows-amd64.exe) and double-click to run.
 
-### Manual download (macOS)
+### macOS — if you downloaded via browser (Gatekeeper)
 
 If you download the `.zip` via a browser, macOS Gatekeeper will block it the first time. This is a one-time click to allow it:
 
@@ -90,4 +98,4 @@ Bump `claude/setup-tool/VERSION`, open a PR, merge. The build workflow:
 
 ### OAuth App
 
-The binary requires a GitHub OAuth App Client ID injected at build time via `-ldflags`. The Client ID is stored as the `FERM_SETUP_OAUTH_CLIENT_ID` org secret in fermrad. Authentication uses the [Authorization Code + PKCE flow](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps) — no client secret is embedded in the binary.
+The binary requires a GitHub OAuth App Client ID injected at build time via `-ldflags`. The Client ID is stored as the `FERM_SETUP_OAUTH_CLIENT_ID` org secret in fermrad. Authentication uses [GitHub Device Flow](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow) — no client secret is required or embedded in the binary.
