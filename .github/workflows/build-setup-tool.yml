@@ -1,14 +1,15 @@
 name: Build ferm-setup
 
-# Builds cross-platform binaries and publishes GitHub releases.
+# Builds cross-platform binaries and publishes a GitHub release.
+# The version is read from claude/setup-tool/VERSION.
 #
-# Beta (automatic):
-#   Triggered whenever anything under claude/ merges to main.
-#   Creates/overwrites the rolling "ferm-setup/beta" pre-release.
+# - Same version as existing release → overwrites binaries in that release.
+# - Newer version → creates a new release.
+# - Older version → blocked by the check-setup-tool-version PR check.
 #
-# Stable (manual):
-#   Run workflow_dispatch from main with a version (e.g. v1.2.0).
-#   Creates a permanent "ferm-setup/v1.2.0" release.
+# Triggers:
+#   push to main touching claude/**  — automatic (runs after merge)
+#   workflow_dispatch                — manual trigger (uses VERSION from checked-out branch)
 #
 # Required secrets:
 #   FERM_SETUP_OAUTH_CLIENT_ID — GitHub OAuth App Client ID (org secret)
@@ -18,11 +19,6 @@ on:
     branches: [main]
     paths: ["claude/**"]
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Version for stable release (e.g. v1.2.0)"
-        required: true
-        type: string
 
 jobs:
   build:
@@ -54,6 +50,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Read version
+        id: version
+        run: |
+          VERSION="$(cat claude/setup-tool/VERSION | tr -d '[:space:]')"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag=ferm-setup/v${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building version ${VERSION}"
+
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23"
@@ -61,9 +65,8 @@ jobs:
           cache-dependency-path: claude/setup-tool/go.mod
 
       - name: Bundle skills
-        # Copies claude/skills/*/SKILL.md into the setup-tool's bundled/ dir
-        # so //go:embed picks them up. Each release captures the exact skills
-        # at this commit.
+        # Copies claude/skills/*/SKILL.md into bundled/ so //go:embed picks them up.
+        # Each release captures the exact skills at this commit.
         run: |
           mkdir -p claude/setup-tool/bundled/skills
           for dir in claude/skills/*/; do
@@ -122,26 +125,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set release metadata
-        id: meta
+      - name: Read version
+        id: version
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=ferm-setup/${{ inputs.version }}"    >> $GITHUB_OUTPUT
-            echo "name=ferm-setup ${{ inputs.version }}"   >> $GITHUB_OUTPUT
-            echo "prerelease=false"                         >> $GITHUB_OUTPUT
+          VERSION="$(cat claude/setup-tool/VERSION | tr -d '[:space:]')"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag=ferm-setup/v${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Check if release already exists
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="ferm-setup/v${{ steps.version.outputs.version }}"
+          if gh release view "$TAG" --repo "${{ github.repository }}" &>/dev/null; then
+            echo "exists=true"  >> $GITHUB_OUTPUT
+            echo "action=Updated" >> $GITHUB_OUTPUT
           else
-            echo "tag=ferm-setup/beta"                      >> $GITHUB_OUTPUT
-            echo "name=ferm-setup (beta)"                   >> $GITHUB_OUTPUT
-            echo "prerelease=true"                          >> $GITHUB_OUTPUT
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "action=Created" >> $GITHUB_OUTPUT
           fi
 
-      - name: Move beta tag to current commit
-        if: github.event_name == 'push'
+      - name: Move release tag to current commit
         run: |
           git config user.email "github-actions@github.com"
           git config user.name "github-actions"
-          git tag -f ferm-setup/beta
-          git push --force origin ferm-setup/beta
+          git tag -f "${{ steps.version.outputs.tag }}"
+          git push --force origin "${{ steps.version.outputs.tag }}"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -150,14 +160,15 @@ jobs:
           merge-multiple: true
 
       - name: Publish release
+        id: release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: ${{ steps.meta.outputs.name }}
-          prerelease: ${{ steps.meta.outputs.prerelease }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "ferm-setup v${{ steps.version.outputs.version }}"
+          prerelease: false
           files: dist/*
           body: |
-            ## ferm-setup
+            ## ferm-setup v${{ steps.version.outputs.version }}
 
             One-command developer setup tool for the Fermrad org. No prerequisites — just download and run.
 
@@ -175,3 +186,27 @@ jobs:
             **macOS / Linux:** Download the `.zip`, double-click to extract, then right-click the binary → Open.
 
             **Windows:** Download the `.exe` and double-click to run.
+
+      - name: Summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          ACTION="${{ steps.existing.outputs.action }}"
+          RELEASE_URL="${{ steps.release.outputs.url }}"
+
+          {
+            echo "## $ACTION release: ferm-setup v${VERSION}"
+            echo ""
+            echo "**[View release →](${RELEASE_URL})**"
+            echo ""
+            echo "### Download links"
+            echo "| Platform | Link |"
+            echo "|---|---|"
+            BASE="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+            echo "| macOS (Apple Silicon) | [ferm-setup-darwin-arm64.zip](${BASE}/ferm-setup-darwin-arm64.zip) |"
+            echo "| macOS (Intel)         | [ferm-setup-darwin-amd64.zip](${BASE}/ferm-setup-darwin-amd64.zip) |"
+            echo "| Linux                 | [ferm-setup-linux-amd64.zip](${BASE}/ferm-setup-linux-amd64.zip) |"
+            echo "| Windows               | [ferm-setup-windows-amd64.exe](${BASE}/ferm-setup-windows-amd64.exe) |"
+          } >> $GITHUB_STEP_SUMMARY

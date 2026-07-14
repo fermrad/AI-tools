@@ -1,0 +1,62 @@
+name: Check ferm-setup version
+
+# Runs on every PR that touches claude/** and validates that the VERSION
+# file in claude/setup-tool/ has not regressed below the latest published
+# release. Fails if the version is older; passes if same or newer.
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ["claude/**"]
+
+jobs:
+  check:
+    name: Version check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read VERSION from PR
+        id: pr
+        run: |
+          VERSION="$(cat claude/setup-tool/VERSION | tr -d '[:space:]')"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "PR version: ${VERSION}"
+
+      - name: Get latest published release version
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LATEST=$(gh release list \
+              --repo "${{ github.repository }}" \
+              --limit 50 \
+              --json tagName \
+            | jq -r '.[] | .tagName | select(startswith("ferm-setup/v"))' \
+            | sed 's|ferm-setup/v||' \
+            | sort -V \
+            | tail -1)
+          LATEST="${LATEST:-0.0.0}"
+          echo "version=${LATEST}" >> $GITHUB_OUTPUT
+          echo "Latest release: ${LATEST}"
+
+      - name: Verify version is not older than latest release
+        env:
+          PR_VER: ${{ steps.pr.outputs.version }}
+          LATEST_VER: ${{ steps.latest.outputs.version }}
+        run: |
+          # sort -V outputs the smaller version first
+          SMALLER="$(printf '%s\n%s' "$PR_VER" "$LATEST_VER" | sort -V | head -1)"
+          if [ "$SMALLER" = "$PR_VER" ] && [ "$PR_VER" != "$LATEST_VER" ]; then
+            echo "::error::VERSION in this PR ($PR_VER) is older than the latest release ($LATEST_VER)."
+            echo "::error::Bump claude/setup-tool/VERSION to $LATEST_VER or higher."
+            exit 1
+          fi
+          if [ "$PR_VER" = "$LATEST_VER" ]; then
+            echo "✓ Version ${PR_VER} — will overwrite the existing ${LATEST_VER} release."
+          else
+            echo "✓ Version ${PR_VER} — will create a new release (latest is ${LATEST_VER})."
+          fi
