@@ -132,79 +132,72 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "tag=ferm-setup/v${VERSION}" >> $GITHUB_OUTPUT
 
-      - name: Check if release already exists
-        id: existing
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="ferm-setup/v${{ steps.version.outputs.version }}"
-          if gh release view "$TAG" --repo "${{ github.repository }}" &>/dev/null; then
-            echo "exists=true"  >> $GITHUB_OUTPUT
-            echo "action=Updated" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "action=Created" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Move release tag to current commit
-        run: |
-          git config user.email "github-actions@github.com"
-          git config user.name "github-actions"
-          git tag -f "${{ steps.version.outputs.tag }}"
-          git push --force origin "${{ steps.version.outputs.tag }}"
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist/
           merge-multiple: true
 
-      - name: Publish release
-        id: release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: "ferm-setup v${{ steps.version.outputs.version }}"
-          prerelease: false
-          files: dist/*
-          body: |
-            ## ferm-setup v${{ steps.version.outputs.version }}
+      - name: Move tag and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.email "github-actions@github.com"
+          git config user.name "github-actions"
+          git tag -f "$TAG"
+          git push --force origin "$TAG"
 
-            One-command developer setup tool for the Fermrad org. No prerequisites — just download and run.
+          NOTES="## ferm-setup v${VERSION}
 
-            ### Download
+          One-command developer setup tool for the Fermrad org. No prerequisites — just download and run.
 
-            | Platform | File |
-            |---|---|
-            | macOS (Apple Silicon) | `ferm-setup-darwin-arm64.zip` |
-            | macOS (Intel) | `ferm-setup-darwin-amd64.zip` |
-            | Linux | `ferm-setup-linux-amd64.zip` |
-            | Windows | `ferm-setup-windows-amd64.exe` |
+          ### Download
 
-            ### Usage
+          | Platform | File |
+          |---|---|
+          | macOS (Apple Silicon) | \`ferm-setup-darwin-arm64.zip\` |
+          | macOS (Intel) | \`ferm-setup-darwin-amd64.zip\` |
+          | Linux | \`ferm-setup-linux-amd64.zip\` |
+          | Windows | \`ferm-setup-windows-amd64.exe\` |
 
-            **macOS / Linux:** Download the `.zip`, double-click to extract, then right-click the binary → Open.
+          ### Usage
 
-            **Windows:** Download the `.exe` and double-click to run.
+          **macOS / Linux:** Download the \`.zip\`, double-click to extract, then right-click the binary → Open.
+
+          **Windows:** Download the \`.exe\` and double-click to run."
+
+          if gh release view "$TAG" --repo "${{ github.repository }}" &>/dev/null; then
+            gh release edit "$TAG" \
+              --title "ferm-setup v${VERSION}" \
+              --notes "$NOTES"
+            gh release upload "$TAG" dist/* --clobber
+            echo "ACTION=Updated" >> $GITHUB_ENV
+          else
+            gh release create "$TAG" \
+              --title "ferm-setup v${VERSION}" \
+              --notes "$NOTES" \
+              dist/*
+            echo "ACTION=Created" >> $GITHUB_ENV
+          fi
 
       - name: Summary
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          TAG="${{ steps.version.outputs.tag }}"
-          ACTION="${{ steps.existing.outputs.action }}"
-          RELEASE_URL="${{ steps.release.outputs.url }}"
-
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${TAG}"
+          BASE="https://github.com/${{ github.repository }}/releases/download/${TAG}"
           {
-            echo "## $ACTION release: ferm-setup v${VERSION}"
+            echo "## ${ACTION} release: ferm-setup v${VERSION}"
             echo ""
             echo "**[View release →](${RELEASE_URL})**"
             echo ""
             echo "### Download links"
             echo "| Platform | Link |"
             echo "|---|---|"
-            BASE="https://github.com/${{ github.repository }}/releases/download/${TAG}"
             echo "| macOS (Apple Silicon) | [ferm-setup-darwin-arm64.zip](${BASE}/ferm-setup-darwin-arm64.zip) |"
             echo "| macOS (Intel)         | [ferm-setup-darwin-amd64.zip](${BASE}/ferm-setup-darwin-amd64.zip) |"
             echo "| Linux                 | [ferm-setup-linux-amd64.zip](${BASE}/ferm-setup-linux-amd64.zip) |"
