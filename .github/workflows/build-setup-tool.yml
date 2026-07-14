@@ -1,0 +1,138 @@
+name: Build ferm-setup
+
+# Builds cross-platform binaries for the ferm-setup CLI tool and uploads them
+# as GitHub Release assets.
+#
+# Triggers:
+#   - Pushing a tag matching ferm-setup/v* (e.g. ferm-setup/v1.0.0) → creates a release
+#   - Manual dispatch                                                  → uploads to a draft release
+#
+# Required secrets:
+#   FERM_SETUP_OAUTH_CLIENT_ID  — GitHub OAuth App Client ID injected at build time
+
+on:
+  push:
+    tags:
+      - "ferm-setup/v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. ferm-setup/v1.0.0) — used only for the draft release name"
+        required: false
+        default: "ferm-setup/v0.0.0-dev"
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            suffix: ""
+          - goos: darwin
+            goarch: amd64
+            suffix: ""
+          - goos: darwin
+            goarch: arm64
+            suffix: ""
+          - goos: windows
+            goarch: amd64
+            suffix: ".exe"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+          cache-dependency-path: claude/setup-tool/go.mod
+
+      - name: Download dependencies
+        working-directory: claude/setup-tool
+        run: go mod tidy && go mod download
+
+      - name: Build
+        working-directory: claude/setup-tool
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          OAUTH_CLIENT_ID: ${{ secrets.FERM_SETUP_OAUTH_CLIENT_ID }}
+        run: |
+          BINARY="ferm-setup-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}"
+          go build \
+            -ldflags="-s -w -X main.githubClientID=${OAUTH_CLIENT_ID}" \
+            -o "$BINARY" \
+            .
+          echo "BINARY=$BINARY" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferm-setup-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: claude/setup-tool/ferm-setup-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "draft=false" >> $GITHUB_OUTPUT
+          else
+            echo "name=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+            echo "draft=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: "ferm-setup ${{ steps.tag.outputs.name }}"
+          draft: ${{ steps.tag.outputs.draft }}
+          body: |
+            ## ferm-setup
+
+            One-command developer setup tool for the Fermrad org.
+
+            ### Download
+
+            | Platform | File |
+            |---|---|
+            | macOS (Apple Silicon) | `ferm-setup-darwin-arm64` |
+            | macOS (Intel) | `ferm-setup-darwin-amd64` |
+            | Linux | `ferm-setup-linux-amd64` |
+            | Windows | `ferm-setup-windows-amd64.exe` |
+
+            ### Usage
+
+            ```
+            chmod +x ferm-setup-darwin-arm64   # macOS/Linux only
+            ./ferm-setup-darwin-arm64
+            ```
+
+            The tool will guide you through GitHub auth, SSH setup, and server provisioning.
+          files: dist/*
