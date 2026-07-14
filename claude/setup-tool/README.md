@@ -13,22 +13,44 @@ One-command developer setup tool for the Fermrad org. Downloads as a single bina
 
 ## Usage
 
-### Download
+### macOS / Linux — one-liner (recommended)
 
-Go to the [latest release](https://github.com/fermrad/AI-tools/releases/latest) and download the file for your platform:
+Downloading via `curl` bypasses macOS Gatekeeper entirely — no security warnings.
 
-| Platform | File |
-|---|---|
-| macOS (Apple Silicon) | `ferm-setup-darwin-arm64.zip` |
-| macOS (Intel) | `ferm-setup-darwin-amd64.zip` |
-| Linux | `ferm-setup-linux-amd64.zip` |
-| Windows | `ferm-setup-windows-amd64.exe` |
+**macOS Apple Silicon:**
+```bash
+curl -fsSL https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-darwin-arm64.zip -o /tmp/ferm-setup.zip \
+  && unzip -o /tmp/ferm-setup.zip -d /tmp \
+  && /tmp/ferm-setup-darwin-arm64
+```
 
-### Run
+**macOS Intel:**
+```bash
+curl -fsSL https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-darwin-amd64.zip -o /tmp/ferm-setup.zip \
+  && unzip -o /tmp/ferm-setup.zip -d /tmp \
+  && /tmp/ferm-setup-darwin-amd64
+```
 
-**macOS / Linux:** Unzip, then right-click the binary → Open (to bypass Gatekeeper on macOS).
+**Linux:**
+```bash
+curl -fsSL https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-linux-amd64.zip -o /tmp/ferm-setup.zip \
+  && unzip -o /tmp/ferm-setup.zip -d /tmp \
+  && /tmp/ferm-setup-linux-amd64
+```
 
-**Windows:** Double-click the `.exe`.
+### Windows
+
+Download [`ferm-setup-windows-amd64.exe`](https://github.com/fermrad/AI-tools/releases/latest/download/ferm-setup-windows-amd64.exe) and double-click to run.
+
+### Manual download (macOS)
+
+If you download the `.zip` via a browser instead, macOS Gatekeeper will block the binary. Fix it by running:
+
+```bash
+xattr -d com.apple.quarantine ./ferm-setup-darwin-arm64
+```
+
+Or: open System Settings → Privacy & Security → scroll down → Allow Anyway.
 
 A browser window opens showing live progress. The only action required is clicking "Connect with GitHub" to authorise, and confirming your SSH key before it is added to the server.
 
