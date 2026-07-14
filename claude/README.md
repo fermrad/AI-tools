@@ -18,17 +18,37 @@ Tools, templates, and configurations for [Claude Code](https://claude.ai/code).
 
 ## Installing skills
 
-Run the install script — it clones this repo (sparse, `claude/` only) and symlinks each skill into `~/.claude/skills/`. Claude Code auto-discovers skills in that directory.
+The install script clones this repo (sparse, `claude/` only) and symlinks each skill into `~/.claude/commands/` so it appears in the `/` autocomplete menu.
+
+### Standard Claude Code CLI (`claude`)
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/fermrad/AI-tools/main/claude/install-claude-skills.sh)
 ```
 
-> **Restart Claude Code after running** — skills are discovered at startup. Type `/` to see them.
+> **Restart Claude Code after running** — type `/` to see the skills in autocomplete.
+
+### `claude-ferm` (custom `CLAUDE_CONFIG_DIR`)
+
+If you use the `claude-ferm` alias (`CLAUDE_CONFIG_DIR=~/.claude-ferm claude`), pass the config dir so skills land in the right place:
+
+```bash
+CLAUDE_CONFIG_DIR=~/.claude-ferm bash <(curl -fsSL https://raw.githubusercontent.com/fermrad/AI-tools/main/claude/install-claude-skills.sh)
+```
+
+Or if you already have the repo cloned:
+
+```bash
+CLAUDE_CONFIG_DIR=~/.claude-ferm bash ~/repos/AI-tools/claude/install-claude-skills.sh
+```
+
+### Claude Desktop
+
+Claude Desktop reads slash commands from the same `~/.claude/commands/` directory (on macOS). The standard one-liner above installs them there — no extra step needed. Restart Claude Desktop after running.
 
 ### Updating
 
-Skills are installed as symlinks, so `git pull` in `~/repos/AI-tools` picks up changes automatically. Restart Claude Code to load updated skill content.
+Skills are installed as symlinks, so `git pull` in `~/repos/AI-tools` picks up changes automatically. Restart Claude Code/Desktop to load updated skill content.
 
 ### On `claude-dev.ferm.dk`
 
@@ -59,6 +79,18 @@ Opens a well-formed pull request with a conventional commit title, descriptive b
 
 ### `/code-review` — `skills/code-review/SKILL.md`
 Reviews staged changes, a PR diff, or specific files for bugs, security issues, and quality — grouped by severity.
+
+### `/bootstrap-app` — `skills/bootstrap-app/SKILL.md`
+Creates a new Fermrad app from the boilerplate and wires up DNS, deploy workflows, Caddy routing, and Microsoft Entra SSO registration for prod/staging/dev.
+
+### `/push-to-remote` — `skills/push-to-remote/SKILL.md`
+Pushes the current local Claude conversation to `claude-dev.ferm.dk` and resumes it as a remote session.
+
+### `/new-remote-session` — `skills/new-remote-session/SKILL.md`
+Starts a new Claude remote session on `claude-dev.ferm.dk` (without pushing a local conversation).
+
+### `/pr-preview` — `skills/pr-preview/SKILL.md`
+Deploys a PR branch as a live preview environment on the development Hetzner server and posts the preview URL as a PR comment.
 
 ---
 
