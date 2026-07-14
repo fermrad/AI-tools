@@ -1,11 +1,10 @@
-// ferm-setup is a one-shot provisioning tool for Fermrad developers.
+// ferm-setup provisions a new Fermrad developer's machine and server access.
 //
-// Prerequisites: GitHub CLI (gh) must be installed and authenticated.
-// Install from https://cli.github.com, then run `gh auth login`.
+// Opens a browser UI showing live progress. Requires:
+//   - GitHub CLI (gh) installed and authenticated: https://cli.github.com
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -14,12 +13,15 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -32,6 +34,234 @@ const (
 	provisionWorkflow = "provision-claude-user.yml"
 	aiToolsRepo       = "fermrad/AI-tools"
 )
+
+// ── Browser UI ────────────────────────────────────────────────────────────────
+
+const uiHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Fermrad Dev Setup</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+         background:#f8fafc;color:#0f172a;min-height:100vh;
+         display:flex;align-items:flex-start;justify-content:center;padding:48px 16px}
+    .card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:32px;
+          width:100%;max-width:560px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+    h1{font-size:1.2rem;font-weight:600;margin-bottom:24px}
+    .steps{display:flex;flex-direction:column;gap:10px}
+    .step{display:flex;align-items:flex-start;gap:10px;font-size:.9rem;line-height:1.5}
+    .icon{width:18px;flex-shrink:0;text-align:center;margin-top:1px;font-size:.85rem}
+    .ok .icon{color:#16a34a}
+    .err .icon,.err .text{color:#dc2626}
+    .dim .icon,.dim .text{color:#6b7280}
+    .confirm{margin-top:20px;padding:16px;background:#f8fafc;
+             border:1px solid #e2e8f0;border-radius:8px}
+    .confirm p{font-size:.85rem;color:#64748b;margin-bottom:10px}
+    code{display:block;font-family:'SF Mono',Monaco,monospace;font-size:.75rem;
+         background:#f1f5f9;padding:8px;border-radius:4px;color:#475569;
+         word-break:break-all;margin-bottom:14px}
+    button{background:#0f172a;color:#fff;border:none;border-radius:6px;
+           padding:8px 18px;font-size:.875rem;font-weight:500;cursor:pointer}
+    button:hover{background:#1e293b}
+    button:disabled{background:#94a3b8;cursor:default}
+    .link-row{margin-top:4px}
+    .link-row a{color:#2563eb;text-decoration:none;font-size:.875rem}
+    .link-row a:hover{text-decoration:underline}
+    .done{margin-top:20px;padding:16px;background:#f0fdf4;border:1px solid #bbf7d0;
+          border-radius:8px;color:#166534;font-size:.875rem;font-weight:500}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .spin{display:inline-block;animation:spin 1s linear infinite}
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>⚙ Fermrad Dev Setup</h1>
+  <div class="steps" id="steps"></div>
+</div>
+<script>
+const root = document.getElementById('steps');
+const es = new EventSource('/events');
+es.onmessage = e => {
+  const ev = JSON.parse(e.data);
+  const d = document.createElement('div');
+  if (ev.type === 'running') {
+    d.className = 'step dim';
+    d.innerHTML = '<span class="icon"><span class="spin">⟳</span></span><span class="text">'+ev.text+'</span>';
+    root.appendChild(d);
+  } else if (ev.type === 'ok') {
+    d.className = 'step ok';
+    d.innerHTML = '<span class="icon">✓</span><span class="text">'+ev.text+'</span>';
+    root.appendChild(d);
+  } else if (ev.type === 'error') {
+    d.className = 'step err';
+    d.innerHTML = '<span class="icon">✗</span><span class="text">'+ev.text+'</span>';
+    root.appendChild(d);
+  } else if (ev.type === 'link') {
+    d.className = 'link-row';
+    d.innerHTML = '<a href="'+ev.url+'" target="_blank">↗ '+ev.text+'</a>';
+    root.appendChild(d);
+  } else if (ev.type === 'confirm') {
+    d.className = 'confirm';
+    const btn = document.createElement('button');
+    btn.textContent = 'Set up server access';
+    btn.onclick = () => {
+      btn.disabled = true;
+      btn.textContent = 'Setting up…';
+      fetch('/confirm', {method:'POST'});
+    };
+    d.innerHTML = '<p>Your SSH public key will be added to the dev server:</p><code>'+ev.text+'</code>';
+    d.appendChild(btn);
+    root.appendChild(d);
+  } else if (ev.type === 'done') {
+    d.className = 'done';
+    d.textContent = '✓ Setup complete — open the job link above to watch provisioning and get your Claude session URL.';
+    root.appendChild(d);
+    es.close();
+  }
+};
+</script>
+</body>
+</html>`
+
+// ── Event bus ─────────────────────────────────────────────────────────────────
+
+type Event struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+	URL  string `json:"url,omitempty"`
+}
+
+type eventBus struct {
+	mu      sync.Mutex
+	history []Event
+	subs    map[int]chan Event
+	nextID  int
+}
+
+func newEventBus() *eventBus {
+	return &eventBus{subs: make(map[int]chan Event)}
+}
+
+func (b *eventBus) publish(e Event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.history = append(b.history, e)
+	for _, ch := range b.subs {
+		select {
+		case ch <- e:
+		default:
+		}
+	}
+}
+
+func (b *eventBus) subscribe() ([]Event, int, <-chan Event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	id := b.nextID
+	b.nextID++
+	ch := make(chan Event, 64)
+	b.subs[id] = ch
+	hist := make([]Event, len(b.history))
+	copy(hist, b.history)
+	return hist, id, ch
+}
+
+func (b *eventBus) unsubscribe(id int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.subs, id)
+}
+
+// ── Progress helpers ──────────────────────────────────────────────────────────
+
+type prog struct{ b *eventBus }
+
+func (p *prog) running(text string)           { p.b.publish(Event{Type: "running", Text: text}) }
+func (p *prog) ok(text string)                { p.b.publish(Event{Type: "ok", Text: text}) }
+func (p *prog) fail(text string)              { p.b.publish(Event{Type: "error", Text: text}) }
+func (p *prog) link(text, url string)         { p.b.publish(Event{Type: "link", Text: text, URL: url}) }
+func (p *prog) confirm(pubKey string)         { p.b.publish(Event{Type: "confirm", Text: pubKey}) }
+func (p *prog) done()                         { p.b.publish(Event{Type: "done"}) }
+
+// ── HTTP server ───────────────────────────────────────────────────────────────
+
+func newHandler(b *eventBus, confirmCh chan<- struct{}) http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(uiHTML))
+	})
+
+	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		hist, id, ch := b.subscribe()
+		defer b.unsubscribe(id)
+
+		send := func(e Event) {
+			data, _ := json.Marshal(e)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+		for _, e := range hist {
+			send(e)
+		}
+
+		ctx := r.Context()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case e, ok := <-ch:
+				if !ok {
+					return
+				}
+				send(e)
+			}
+		}
+	})
+
+	mux.HandleFunc("/confirm", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		select {
+		case confirmCh <- struct{}{}:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	return mux
+}
+
+// ── Browser launcher ──────────────────────────────────────────────────────────
+
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	cmd.Start()
+}
 
 // ── GitHub API helpers ────────────────────────────────────────────────────────
 
@@ -77,7 +307,7 @@ func authenticate() (token, username string, err error) {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return "", "", fmt.Errorf(
 			"GitHub CLI (gh) is not installed.\n" +
-				"  Install it from https://cli.github.com, then run: gh auth login",
+				"Install it from https://cli.github.com, then run: gh auth login",
 		)
 	}
 
@@ -85,7 +315,7 @@ func authenticate() (token, username string, err error) {
 	if err != nil || strings.TrimSpace(string(out)) == "" {
 		return "", "", fmt.Errorf(
 			"not logged in to GitHub CLI.\n" +
-				"  Run: gh auth login",
+				"Run: gh auth login",
 		)
 	}
 	token = strings.TrimSpace(string(out))
@@ -104,7 +334,6 @@ func authenticate() (token, username string, err error) {
 func checkOrgMembership(token, username string) error {
 	var membership struct {
 		State string `json:"state"`
-		Role  string `json:"role"`
 	}
 	path := fmt.Sprintf("/orgs/%s/memberships/%s", fermradOrg, username)
 	if err := apiGet(token, path, &membership); err != nil {
@@ -184,7 +413,7 @@ func marshalOpenSSHPrivateKey(key ed25519.PrivateKey, comment string) ([]byte, e
 	privBlob.Write(checkInt[:])
 	writeStr([]byte("ssh-ed25519"))
 	writeStr(pub)
-	writeStr(key) // 64-byte seed+pub
+	writeStr(key)
 	writeStr([]byte(comment))
 	for i := 1; privBlob.Len()%8 != 0; i++ {
 		privBlob.WriteByte(byte(i))
@@ -257,7 +486,6 @@ func installSkills(token string) error {
 	if err := cloneOrUpdateRepo(token, repoDir); err != nil {
 		return fmt.Errorf("updating AI-tools: %w", err)
 	}
-
 	if err := os.MkdirAll(commandsDst, 0755); err != nil {
 		return err
 	}
@@ -279,12 +507,13 @@ func installSkills(token string) error {
 		linkPath := filepath.Join(commandsDst, e.Name()+".md")
 		os.Remove(linkPath)
 		if err := createLink(skillMD, linkPath); err != nil {
-			fmt.Printf("  warning: could not link %s: %v\n", e.Name(), err)
 			continue
 		}
 		installed++
 	}
-	fmt.Printf("  installed %d skills → %s\n", installed, commandsDst)
+	if installed == 0 {
+		return fmt.Errorf("no skills found in %s", skillsSrc)
+	}
 	return nil
 }
 
@@ -292,7 +521,6 @@ func cloneOrUpdateRepo(token, repoDir string) error {
 	cloneURL := fmt.Sprintf("https://x-access-token:%s@github.com/%s.git", token, aiToolsRepo)
 
 	if _, err := os.Stat(filepath.Join(repoDir, ".git")); os.IsNotExist(err) {
-		fmt.Printf("  cloning AI-tools (claude/ only)...\n")
 		if err := gitRun("", "clone", "--filter=blob:none", "--sparse", cloneURL, repoDir); err != nil {
 			return err
 		}
@@ -303,12 +531,11 @@ func cloneOrUpdateRepo(token, repoDir string) error {
 			fmt.Sprintf("https://github.com/%s.git", aiToolsRepo))
 	}
 
-	fmt.Printf("  updating AI-tools...\n")
 	return gitRun(repoDir, "pull", "--ff-only")
 }
 
 func gitRun(dir string, args ...string) error {
-	cmdArgs := []string{}
+	var cmdArgs []string
 	if dir != "" {
 		cmdArgs = append(cmdArgs, "-C", dir)
 	}
@@ -318,8 +545,7 @@ func gitRun(dir string, args ...string) error {
 	return cmd.Run()
 }
 
-// createLink creates a symlink on Unix or copies the file on Windows (where
-// symlinks require elevated privileges or developer mode).
+// createLink creates a symlink on Unix or copies the file on Windows.
 func createLink(target, link string) error {
 	if runtime.GOOS == "windows" {
 		data, err := os.ReadFile(target)
@@ -364,87 +590,102 @@ func triggerProvisioning(token, username, pubKey string) (runURL string, err err
 	return runURL, nil
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+// ── Setup flow ────────────────────────────────────────────────────────────────
 
-func check(step string, err error) {
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "\n✗ %s: %v\n", step, err)
-		os.Exit(1)
-	}
-}
-
-func main() {
-	fmt.Println("\n╔══════════════════════════════════════╗")
-	fmt.Println("║       Fermrad Dev Setup Tool         ║")
-	fmt.Println("╚══════════════════════════════════════╝")
-
-	// 1. Authenticate via gh CLI
-	fmt.Println("\n→ Authenticating with GitHub...")
+func runSetup(p *prog, confirmCh <-chan struct{}) {
+	// 1. Auth
+	p.running("Authenticating with GitHub…")
 	token, username, err := authenticate()
-	check("authentication", err)
-	fmt.Printf("  ✓ Signed in as %s\n", username)
+	if err != nil {
+		p.fail(err.Error())
+		return
+	}
+	p.ok("Signed in as " + username)
 
-	// 2. Verify org membership
-	fmt.Printf("\n→ Checking %s org membership...\n", fermradOrg)
-	check("org membership", checkOrgMembership(token, username))
-	fmt.Printf("  ✓ Active %s member\n", fermradOrg)
+	// 2. Org membership
+	p.running("Checking fermrad org membership…")
+	if err := checkOrgMembership(token, username); err != nil {
+		p.fail(err.Error())
+		return
+	}
+	p.ok("Active fermrad member")
 
 	// 3. SSH key
-	fmt.Println("\n→ Checking SSH key...")
+	p.running("Checking SSH key…")
 	privPath, pubKey, err := findOrCreateSSHKey(username)
-	check("SSH key", err)
-	action := "found"
-	if strings.Contains(privPath, "id_ed25519") {
-		if _, pubStatErr := os.Stat(privPath + ".pub"); pubStatErr == nil {
-			action = "generated"
-		}
+	if err != nil {
+		p.fail("SSH key: " + err.Error())
+		return
 	}
-	fmt.Printf("  ✓ Key %s: %s\n", action, privPath)
+	action := "found"
+	if _, statErr := os.Stat(privPath + ".pub"); statErr != nil {
+		action = "generated"
+	}
+	p.ok("SSH key " + action + ": " + privPath)
 
 	// 4. SSH config
-	fmt.Println("\n→ Configuring SSH...")
+	p.running("Configuring SSH…")
 	alreadySet, err := writeSSHConfig(username, privPath)
-	check("SSH config", err)
+	if err != nil {
+		p.fail("SSH config: " + err.Error())
+		return
+	}
 	if alreadySet {
-		fmt.Printf("  ✓ %s already in ~/.ssh/config\n", devServerHost)
+		p.ok(devServerHost + " already in ~/.ssh/config")
 	} else {
-		fmt.Printf("  ✓ Added %s → User %s\n", devServerHost, username)
+		p.ok("Added " + devServerHost + " to ~/.ssh/config")
 	}
 
 	// 5. Skills
-	fmt.Println("\n→ Installing Claude Code skills...")
-	check("skills install", installSkills(token))
-
-	// 6. Provision server
-	fmt.Printf("\n→ Provisioning server access on %s...\n", devServerHost)
-	preview := pubKey
-	if len(preview) > 60 {
-		preview = preview[:60] + "..."
+	p.running("Installing Claude Code skills…")
+	if err := installSkills(token); err != nil {
+		p.fail("Skills: " + err.Error())
+		return
 	}
-	fmt.Printf("  Public key: %s\n", preview)
+	p.ok("Claude Code skills installed")
 
-	fmt.Print("\n  Trigger server provisioning? [Y/n] ")
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Scan()
-	answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
-	if answer != "" && answer != "y" && answer != "yes" {
-		fmt.Println("\nSkipped. Run this tool again when ready, or share your public key")
-		fmt.Println("with a fermrad admin to provision server access manually.")
-		os.Exit(0)
-	}
+	// 6. Confirm — waits for user to click button in browser
+	p.confirm(pubKey)
+	<-confirmCh
 
+	// 7. Provision
+	p.running("Triggering server provisioning…")
 	runURL, err := triggerProvisioning(token, username, pubKey)
-	check("triggering provisioning", err)
-
-	fmt.Println("\n╔══════════════════════════════════════╗")
-	fmt.Println("║             All done!                ║")
-	fmt.Println("╚══════════════════════════════════════╝")
-	if runURL != "" {
-		fmt.Printf("\n  Provisioning job: %s\n", runURL)
+	if err != nil {
+		p.fail("Provisioning: " + err.Error())
+		return
 	}
-	fmt.Printf("\n  The server is being set up. Once the GitHub Actions\n")
-	fmt.Printf("  workflow completes, open the job summary to get your\n")
-	fmt.Printf("  Claude session link.\n\n")
-	fmt.Printf("  To start a session later:\n")
-	fmt.Printf("    /new-remote-session\n\n")
+	if runURL != "" {
+		p.link("View provisioning job on GitHub Actions", runURL)
+	}
+	p.done()
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+func main() {
+	b := newEventBus()
+	confirmCh := make(chan struct{}, 1)
+
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not start server: %v\n", err)
+		os.Exit(1)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	addr := fmt.Sprintf("http://localhost:%d", port)
+
+	srv := &http.Server{Handler: newHandler(b, confirmCh)}
+	go srv.Serve(l)
+
+	time.Sleep(50 * time.Millisecond)
+	fmt.Printf("Opening setup UI at %s\n", addr)
+	openBrowser(addr)
+
+	p := &prog{b: b}
+	go runSetup(p, confirmCh)
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt)
+	<-quit
 }

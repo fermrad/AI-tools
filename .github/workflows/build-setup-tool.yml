@@ -33,15 +33,19 @@ jobs:
           - goos: linux
             goarch: amd64
             suffix: ""
+            zip: true
           - goos: darwin
             goarch: amd64
             suffix: ""
+            zip: true
           - goos: darwin
             goarch: arm64
             suffix: ""
+            zip: true
           - goos: windows
             goarch: amd64
             suffix: ".exe"
+            zip: false
 
     steps:
       - uses: actions/checkout@v4
@@ -67,11 +71,22 @@ jobs:
           go build -ldflags="-s -w" -o "$BINARY" .
           echo "BINARY=$BINARY" >> $GITHUB_ENV
 
+      - name: Package (zip with executable bit)
+        working-directory: claude/setup-tool
+        run: |
+          if [ "${{ matrix.zip }}" = "true" ]; then
+            chmod +x "$BINARY"
+            zip "${BINARY}.zip" "$BINARY"
+            echo "ASSET=${BINARY}.zip" >> $GITHUB_ENV
+          else
+            echo "ASSET=${BINARY}" >> $GITHUB_ENV
+          fi
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ferm-setup-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: claude/setup-tool/ferm-setup-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+          path: claude/setup-tool/${{ env.ASSET }}
           if-no-files-found: error
 
   release:
@@ -113,23 +128,20 @@ jobs:
 
             One-command developer setup tool for the Fermrad org.
 
+            **Prerequisite:** [GitHub CLI](https://cli.github.com) installed and logged in (`gh auth login`).
+
             ### Download
 
             | Platform | File |
             |---|---|
-            | macOS (Apple Silicon) | `ferm-setup-darwin-arm64` |
-            | macOS (Intel) | `ferm-setup-darwin-amd64` |
-            | Linux | `ferm-setup-linux-amd64` |
+            | macOS (Apple Silicon) | `ferm-setup-darwin-arm64.zip` |
+            | macOS (Intel) | `ferm-setup-darwin-amd64.zip` |
+            | Linux | `ferm-setup-linux-amd64.zip` |
             | Windows | `ferm-setup-windows-amd64.exe` |
 
             ### Usage
 
-            ```
-            chmod +x ferm-setup-darwin-arm64   # macOS/Linux only
-            ./ferm-setup-darwin-arm64
-            ```
+            **macOS / Linux:** Download the `.zip`, double-click to extract, then right-click the binary → Open.
 
-            **Prerequisite:** [GitHub CLI](https://cli.github.com) installed and logged in (`gh auth login`).
-
-            The tool will guide you through SSH setup and server provisioning.
+            **Windows:** Download the `.exe` and double-click to run.
           files: dist/*
