@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
@@ -477,84 +478,52 @@ func writeSSHConfig(username, privPath string) (alreadySet bool, err error) {
 
 // ── Claude skills installation ────────────────────────────────────────────────
 
-func installSkills(token string) error {
+// installSkills downloads every SKILL.md from claude/skills/ in the AI-tools
+// repo and writes it directly to ~/.claude/commands/<name>.md, overwriting any
+// existing file. Safe to re-run — always reflects the latest skills.
+func installSkills(token string) (int, error) {
 	home, _ := os.UserHomeDir()
-	repoDir := filepath.Join(home, "repos", "AI-tools")
-	skillsSrc := filepath.Join(repoDir, "claude", "skills")
 	commandsDst := filepath.Join(home, ".claude", "commands")
-
-	if err := cloneOrUpdateRepo(token, repoDir); err != nil {
-		return fmt.Errorf("updating AI-tools: %w", err)
-	}
 	if err := os.MkdirAll(commandsDst, 0755); err != nil {
-		return err
+		return 0, err
 	}
 
-	entries, err := os.ReadDir(skillsSrc)
-	if err != nil {
-		return fmt.Errorf("reading skills dir: %w", err)
+	// List the skills directory
+	var entries []struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+	listPath := fmt.Sprintf("/repos/%s/contents/claude/skills", aiToolsRepo)
+	if err := apiGet(token, listPath, &entries); err != nil {
+		return 0, fmt.Errorf("listing skills: %w", err)
 	}
 
 	installed := 0
 	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+		if e.Type != "dir" {
 			continue
 		}
-		skillMD := filepath.Join(skillsSrc, e.Name(), "SKILL.md")
-		if _, err := os.Stat(skillMD); err != nil {
+		var file struct {
+			Content string `json:"content"` // base64-encoded by GitHub API
+		}
+		filePath := fmt.Sprintf("/repos/%s/contents/claude/skills/%s/SKILL.md", aiToolsRepo, e.Name)
+		if err := apiGet(token, filePath, &file); err != nil {
+			continue // no SKILL.md in this dir, skip
+		}
+		content, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(file.Content, "\n", ""))
+		if err != nil {
 			continue
 		}
-		linkPath := filepath.Join(commandsDst, e.Name()+".md")
-		os.Remove(linkPath)
-		if err := createLink(skillMD, linkPath); err != nil {
-			continue
+		dst := filepath.Join(commandsDst, e.Name+".md")
+		if err := os.WriteFile(dst, content, 0644); err != nil {
+			return installed, fmt.Errorf("writing %s: %w", e.Name, err)
 		}
 		installed++
 	}
 	if installed == 0 {
-		return fmt.Errorf("no skills found in %s", skillsSrc)
+		return 0, fmt.Errorf("no skills found in %s/claude/skills", aiToolsRepo)
 	}
-	return nil
-}
-
-func cloneOrUpdateRepo(token, repoDir string) error {
-	cloneURL := fmt.Sprintf("https://x-access-token:%s@github.com/%s.git", token, aiToolsRepo)
-
-	if _, err := os.Stat(filepath.Join(repoDir, ".git")); os.IsNotExist(err) {
-		if err := gitRun("", "clone", "--filter=blob:none", "--sparse", cloneURL, repoDir); err != nil {
-			return err
-		}
-		if err := gitRun(repoDir, "sparse-checkout", "set", "claude"); err != nil {
-			return err
-		}
-		return gitRun(repoDir, "remote", "set-url", "origin",
-			fmt.Sprintf("https://github.com/%s.git", aiToolsRepo))
-	}
-
-	return gitRun(repoDir, "pull", "--ff-only")
-}
-
-func gitRun(dir string, args ...string) error {
-	var cmdArgs []string
-	if dir != "" {
-		cmdArgs = append(cmdArgs, "-C", dir)
-	}
-	cmdArgs = append(cmdArgs, args...)
-	cmd := exec.Command("git", cmdArgs...)
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-// createLink creates a symlink on Unix or copies the file on Windows.
-func createLink(target, link string) error {
-	if runtime.GOOS == "windows" {
-		data, err := os.ReadFile(target)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(link, data, 0644)
-	}
-	return os.Symlink(target, link)
+	return installed, nil
 }
 
 // ── Provisioning workflow ─────────────────────────────────────────────────────
@@ -638,11 +607,12 @@ func runSetup(p *prog, confirmCh <-chan struct{}) {
 
 	// 5. Skills
 	p.running("Installing Claude Code skills…")
-	if err := installSkills(token); err != nil {
+	n, err := installSkills(token)
+	if err != nil {
 		p.fail("Skills: " + err.Error())
 		return
 	}
-	p.ok("Claude Code skills installed")
+	p.ok(fmt.Sprintf("Installed %d Claude Code skills → ~/.claude/commands/", n))
 
 	// 6. Confirm — waits for user to click button in browser
 	p.confirm(pubKey)
