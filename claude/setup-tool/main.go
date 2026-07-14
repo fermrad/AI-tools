@@ -479,44 +479,55 @@ func writeSSHConfig(username, privPath string) (alreadySet bool, err error) {
 // ── Claude skills installation ────────────────────────────────────────────────
 
 // installSkills downloads every SKILL.md from claude/skills/ in the AI-tools
-// repo and writes it directly to ~/.claude/commands/<name>.md, overwriting any
-// existing file. Safe to re-run — always reflects the latest skills.
+// repo and writes it to both locations Claude Code reads from:
+//   ~/.claude/skills/<name>/SKILL.md  — skills API (directory format)
+//   ~/.claude/commands/<name>.md      — commands API (flat-file format)
+// Existing files are overwritten, so re-running always installs the latest.
 func installSkills(token string) (int, error) {
 	home, _ := os.UserHomeDir()
+	skillsDst := filepath.Join(home, ".claude", "skills")
 	commandsDst := filepath.Join(home, ".claude", "commands")
-	if err := os.MkdirAll(commandsDst, 0755); err != nil {
-		return 0, err
+	for _, dir := range []string{skillsDst, commandsDst} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return 0, err
+		}
 	}
 
-	// List the skills directory
 	var entries []struct {
 		Name string `json:"name"`
 		Type string `json:"type"`
 	}
-	listPath := fmt.Sprintf("/repos/%s/contents/claude/skills", aiToolsRepo)
-	if err := apiGet(token, listPath, &entries); err != nil {
+	if err := apiGet(token, fmt.Sprintf("/repos/%s/contents/claude/skills", aiToolsRepo), &entries); err != nil {
 		return 0, fmt.Errorf("listing skills: %w", err)
 	}
 
 	installed := 0
 	for _, e := range entries {
-		if e.Type != "dir" {
+		if e.Type != "dir" || strings.HasPrefix(e.Name, ".") {
 			continue
 		}
 		var file struct {
 			Content string `json:"content"` // base64-encoded by GitHub API
 		}
-		filePath := fmt.Sprintf("/repos/%s/contents/claude/skills/%s/SKILL.md", aiToolsRepo, e.Name)
-		if err := apiGet(token, filePath, &file); err != nil {
+		path := fmt.Sprintf("/repos/%s/contents/claude/skills/%s/SKILL.md", aiToolsRepo, e.Name)
+		if err := apiGet(token, path, &file); err != nil {
 			continue // no SKILL.md in this dir, skip
 		}
 		content, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(file.Content, "\n", ""))
 		if err != nil {
 			continue
 		}
-		dst := filepath.Join(commandsDst, e.Name+".md")
-		if err := os.WriteFile(dst, content, 0644); err != nil {
-			return installed, fmt.Errorf("writing %s: %w", e.Name, err)
+		// ~/.claude/skills/<name>/SKILL.md
+		skillDir := filepath.Join(skillsDst, e.Name)
+		if err := os.MkdirAll(skillDir, 0755); err != nil {
+			return installed, err
+		}
+		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), content, 0644); err != nil {
+			return installed, fmt.Errorf("writing skills/%s: %w", e.Name, err)
+		}
+		// ~/.claude/commands/<name>.md
+		if err := os.WriteFile(filepath.Join(commandsDst, e.Name+".md"), content, 0644); err != nil {
+			return installed, fmt.Errorf("writing commands/%s: %w", e.Name, err)
 		}
 		installed++
 	}
@@ -612,7 +623,7 @@ func runSetup(p *prog, confirmCh <-chan struct{}) {
 		p.fail("Skills: " + err.Error())
 		return
 	}
-	p.ok(fmt.Sprintf("Installed %d Claude Code skills → ~/.claude/commands/", n))
+	p.ok(fmt.Sprintf("Installed %d Claude Code skills → ~/.claude/skills/ and ~/.claude/commands/", n))
 
 	// 6. Confirm — waits for user to click button in browser
 	p.confirm(pubKey)
