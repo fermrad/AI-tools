@@ -7,8 +7,7 @@ name: Build ferm-setup
 #   - Pushing a tag matching ferm-setup/v* (e.g. ferm-setup/v1.0.0) → creates a release
 #   - Manual dispatch                                                  → uploads to a draft release
 #
-# Required secrets:
-#   FERM_SETUP_OAUTH_CLIENT_ID  — GitHub OAuth App Client ID injected at build time
+# No secrets required. The tool uses the user's local `gh` CLI session at runtime.
 
 on:
   push:
@@ -63,13 +62,9 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-          OAUTH_CLIENT_ID: ${{ secrets.FERM_SETUP_OAUTH_CLIENT_ID }}
         run: |
           BINARY="ferm-setup-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}"
-          go build \
-            -ldflags="-s -w -X main.githubClientID=${OAUTH_CLIENT_ID}" \
-            -o "$BINARY" \
-            .
+          go build -ldflags="-s -w" -o "$BINARY" .
           echo "BINARY=$BINARY" >> $GITHUB_ENV
 
       - name: Upload artifact
@@ -134,5 +129,7 @@ jobs:
             ./ferm-setup-darwin-arm64
             ```
 
-            The tool will guide you through GitHub auth, SSH setup, and server provisioning.
+            **Prerequisite:** [GitHub CLI](https://cli.github.com) installed and logged in (`gh auth login`).
+
+            The tool will guide you through SSH setup and server provisioning.
           files: dist/*
