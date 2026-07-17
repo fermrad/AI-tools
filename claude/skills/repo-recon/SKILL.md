@@ -17,7 +17,7 @@ git -C ~/repos/AI-tools checkout main && git -C ~/repos/AI-tools pull --ff-only
 Then read (once per session):
 
 - `~/repos/AI-tools/claude/rules/development-practices.md` — read library docs before use, code quality, security
-- `~/repos/AI-tools/claude/CLAUDE.md.template` — PR rules that apply in all app repos (branch from `staging`; every PR = code + tests + docs)
+- `~/repos/AI-tools/claude/CLAUDE.md.template` — PR rules that apply in all app repos (branch from `main` and target `main` — there is no `staging` branch; every PR = code + tests + docs)
 - `~/repos/AI-tools/claude/rules/infrastructure.md` — only when the task touches servers, Docker, Caddy/Nginx, Terraform, or databases
 
 ## 2. Resolve the real repo
@@ -37,8 +37,7 @@ no local clone at all — never conclude something doesn't exist from the local 
 ```bash
 git -C <folder> fetch origin
 git -C <folder> status -sb
-git -C <folder> log --oneline HEAD..origin/main      # commits you haven't seen
-git -C <folder> log --oneline HEAD..origin/staging   # if the repo has staging
+git -C <folder> log --oneline HEAD..origin/main      # commits you haven't seen (main is the only long-lived branch)
 gh pr list -R fermrad/<repo> --state open
 ```
 
