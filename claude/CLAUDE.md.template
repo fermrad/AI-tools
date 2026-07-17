@@ -8,23 +8,44 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## PR Workflow
 
-- **Every piece of work starts with a new branch based on `staging`**:
+- **Every piece of work starts with a new branch based on `main`**:
   ```bash
-  git checkout staging && git pull origin staging
+  git checkout main && git pull origin main
   git checkout -b feat/my-feature   # or fix/, ci/, docs/, refactor/
   ```
-  Never branch from `main` or from another feature branch.
+  Never branch from another feature branch. There is no `staging` branch —
+  environments are deployed from `main` (or an explicitly chosen ref), never from
+  per-environment branches.
 
 - **Every PR must contain all three** — do not open a PR until all three are present:
   1. **The feature or fix** — the code change itself
   2. **Tests** — new or updated tests covering the happy path and key edge cases; a regression test for bug fixes. Do not open a PR for untested code.
   3. **Updated documentation** — any docs, README sections, or CLAUDE.md notes that are now stale must be updated in the same PR. Do not leave docs out of sync.
 
-- **All changes go through a PR** — never commit directly to `main` or `staging`. Create a branch, push, open a PR.
+- **All changes go through a PR** — never commit directly to `main`. Create a branch, push, open a PR.
 - **Keep PRs small** — split independent changes into separate PRs; a reviewer should be able to understand each PR in under 5 minutes.
 - **Update the PR description** when pushing additional commits: `gh pr edit <number> --body "..."`.
 - **PR title format**: `type(scope): description` where type is `feat`, `fix`, `refactor`, `ci`, or `docs`.
-- **Target branch**: `staging` for normal work; `main` only for hotfixes.
+- **Target branch**: `main`, always — including hotfixes.
+
+## Deploy Model
+
+- **Merging to `main` auto-deploys to dev + staging.** Production only moves on a
+  manual `workflow_dispatch` of the deploy workflow. The human gate is the dispatch
+  itself.
+- **Keep `main` deployable at all times.** Unfinished work stays on its feature
+  branch (use the PR preview environment to see it live). Everything on `main` ships
+  to production on the next prod dispatch, ready or not.
+- **Hotfix flow**: merge the fix to `main` via a normal PR, then dispatch the prod
+  deploy. Nothing on dev/staging is lost by this — environments are rendered from
+  git refs, and a prod deploy only touches the prod box.
+- **If `main` contains unreleased work that must not ship yet**: dispatch the deploy
+  workflow with an explicit `ref` — a hotfix branch cut from the SHA production
+  currently runs — instead of `main`, and merge that branch back afterwards. This is
+  the escape hatch, not the norm; prefer keeping `main` deployable.
+- **Deploys mirror the ref exactly** (`rsync --delete`): only `.env` on the server,
+  the database, and volumes survive between deploys. Never hand-edit code on a
+  server — the next deploy silently reverts it.
 
 ## Project Structure
 
