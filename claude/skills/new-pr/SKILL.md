@@ -61,9 +61,20 @@ Open a pull request for the current branch. Steps:
    - Run the test suite and confirm it passes: `npm test` (or the project's equivalent).
    - For UI-only changes with no logic, document in the PR body why tests aren't applicable.
 
-   **Updated documentation:**
-   - Any README sections, CLAUDE.md notes, architecture docs, or inline docs that are now stale must be updated in this PR.
-   - Do not leave documentation out of sync with the code — docs updates belong in the same PR as the change that made them stale.
+   **Updated documentation — audit the whole org, not just this repo:**
+   A change in one repo routinely makes docs stale in *other* repos. Before opening
+   the PR, run this cross-repo docs audit and fix (or open follow-up PRs for) whatever it surfaces:
+
+   - **This repo:** README, CLAUDE.md, architecture/deploy docs, and inline docs made stale by the change.
+   - **The ferm-os vault (`fermrad/ferm-os`) — the single source of truth.** If the change touches any of the following, the vault's `41.10 App-arkitektur`, `41.12 Miljøer og deploy`, and the relevant `13.x Drift`-notes almost certainly need updating:
+     - **Topology / hosting:** which box an app runs on, DNS records, public vs. Tailscale-only, Caddy/nginx.
+     - **Deploy model:** how an app deploys (Model A vs. B), triggers, branch/dispatch semantics.
+     - **App surface:** new/removed endpoints, MCP tools, service APIs, env vars.
+     - **New environment going live** (a prod that didn't exist before), or an app moving between boxes.
+   - **Sibling apps:** if the change alters a shared contract (an endpoint area51 calls, a cross-app SSO cookie, a shared library), update the consuming app's docs too.
+   - **How to audit fast:** `git grep -n` the old fact (old IP, old box name, "not set up yet", old tool count) across each repo on `origin/main` — stale docs repeat the superseded claim verbatim. Verify topology claims against reality (`dig`, `docker ps`) rather than trusting the doc.
+
+   Do not leave documentation out of sync — docs updates belong in the same PR as the change that made them stale (or a linked follow-up PR when they live in another repo).
 
 7. **Write the PR body** — include:
    - Short bullet summary of what changed and why (not just what — the diff shows that)
@@ -71,7 +82,7 @@ Open a pull request for the current branch. Steps:
    - Test plan: what a reviewer should check manually (especially for UI)
    - Any migration steps, env var changes, or breaking changes
 
-8. **Create the PR** targeting the correct base branch (default: `staging`):
+8. **Create the PR** targeting `main` (there is no `staging` branch — miljøer er servere, ikke brancher):
    ```bash
    gh pr create --base main --title "<title>" --body-file /tmp/pr-body.txt
    ```
