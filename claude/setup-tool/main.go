@@ -142,7 +142,7 @@ es.onmessage = e => {
       btn.textContent = 'Setting up…';
       fetch('/confirm', {method:'POST'});
     };
-    d.innerHTML = '<p>Your SSH public key will be added to the dev server:</p><code>'+ev.text+'</code>';
+    d.innerHTML = '<p>Your SSH public key will be registered on the dev server (safe to re-run — existing keys are not removed):</p><code>'+ev.text+'</code>';
     d.appendChild(btn);
     root.appendChild(d);
   } else if (ev.type === 'done') {
@@ -427,7 +427,9 @@ func checkOrgMembership(token, username string) error {
 
 // ── SSH key handling ─────────────────────────────────────────────────────────
 
-func findOrCreateSSHKey(username string) (privPath, pubKey string, err error) {
+// findOrCreateSSHKey finds an existing SSH key or generates a new Ed25519 one.
+// generated is true only when a new key was created on this run.
+func findOrCreateSSHKey(username string) (privPath, pubKey string, generated bool, err error) {
 	home, _ := os.UserHomeDir()
 	sshDir := filepath.Join(home, ".ssh")
 	os.MkdirAll(sshDir, 0700)
@@ -436,12 +438,16 @@ func findOrCreateSSHKey(username string) (privPath, pubKey string, err error) {
 		pubPath := filepath.Join(sshDir, name+".pub")
 		data, readErr := os.ReadFile(pubPath)
 		if readErr == nil && len(data) > 0 {
-			return filepath.Join(sshDir, name), strings.TrimSpace(string(data)), nil
+			return filepath.Join(sshDir, name), strings.TrimSpace(string(data)), false, nil
 		}
 	}
 
-	pubKey, privPath, err = generateEd25519Key(sshDir, username)
-	return
+	var genPub string
+	genPub, privPath, err = generateEd25519Key(sshDir, username)
+	if err != nil {
+		return
+	}
+	return privPath, genPub, true, nil
 }
 
 func generateEd25519Key(sshDir, comment string) (pubKeyStr, privPath string, err error) {
@@ -555,6 +561,82 @@ func writeSSHConfig(username, privPath string) (alreadySet bool, err error) {
 	return false, err
 }
 
+// ── Claude Code settings ──────────────────────────────────────────────────────
+
+// configureClaudePermissions adds the allow-rules that the /push-to-remote
+// skill needs into whatever settings.json Claude Code is currently using
+// (respects CLAUDE_CONFIG_DIR; falls back to ~/.claude). Idempotent — rules
+// already present are never duplicated. Existing keys/values are preserved.
+func configureClaudePermissions(username string) (alreadySet bool, err error) {
+	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if configDir == "" {
+		home, _ := os.UserHomeDir()
+		configDir = filepath.Join(home, ".claude")
+	}
+	settingsPath := filepath.Join(configDir, "settings.json")
+
+	needed := []string{
+		fmt.Sprintf("Bash(ssh %s@%s *)", username, devServerHost),
+		fmt.Sprintf("Bash(scp * %s@%s:*)", username, devServerHost),
+		"Bash(gh workflow run start-claude-session.yml --repo fermrad/infrastructure *)",
+		"Bash(gh run list --repo fermrad/infrastructure *)",
+		"Bash(gh run watch * --repo fermrad/infrastructure *)",
+	}
+
+	var settings map[string]interface{}
+	data, readErr := os.ReadFile(settingsPath)
+	if readErr == nil {
+		if jsonErr := json.Unmarshal(data, &settings); jsonErr != nil {
+			return false, fmt.Errorf("settings.json has invalid JSON — fix it manually: %w", jsonErr)
+		}
+	}
+	if settings == nil {
+		settings = make(map[string]interface{})
+	}
+
+	perms, _ := settings["permissions"].(map[string]interface{})
+	if perms == nil {
+		perms = make(map[string]interface{})
+	}
+
+	var allow []string
+	if arr, ok := perms["allow"].([]interface{}); ok {
+		for _, v := range arr {
+			if s, ok := v.(string); ok {
+				allow = append(allow, s)
+			}
+		}
+	}
+
+	existing := make(map[string]bool, len(allow))
+	for _, s := range allow {
+		existing[s] = true
+	}
+
+	changed := false
+	for _, rule := range needed {
+		if !existing[rule] {
+			allow = append(allow, rule)
+			changed = true
+		}
+	}
+	if !changed {
+		return true, nil
+	}
+
+	perms["allow"] = allow
+	settings["permissions"] = perms
+
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return false, err
+	}
+	return false, os.WriteFile(settingsPath, append(out, '\n'), 0644)
+}
+
 // ── Claude skills installation ────────────────────────────────────────────────
 
 // installSkills writes the skills bundled into the binary to both locations
@@ -661,13 +743,13 @@ func runSetup(p *prog, confirmCh <-chan struct{}) {
 
 	// 3. SSH key
 	p.running("Checking SSH key…")
-	privPath, pubKey, err := findOrCreateSSHKey(username)
+	privPath, pubKey, generated, err := findOrCreateSSHKey(username)
 	if err != nil {
 		p.fail("SSH key: " + err.Error())
 		return
 	}
 	action := "found"
-	if _, statErr := os.Stat(privPath + ".pub"); statErr != nil {
+	if generated {
 		action = "generated"
 	}
 	p.ok("SSH key " + action + ": " + privPath)
@@ -694,11 +776,24 @@ func runSetup(p *prog, confirmCh <-chan struct{}) {
 	}
 	p.ok(fmt.Sprintf("Installed %d Claude Code skills → ~/.claude/skills/ and ~/.claude/commands/", n))
 
-	// 6. Confirm — waits for user to click button in browser
+	// 6. Claude Code permissions
+	p.running("Configuring Claude Code permissions…")
+	alreadyPerms, err := configureClaudePermissions(username)
+	if err != nil {
+		p.fail("Claude Code settings: " + err.Error())
+		return
+	}
+	if alreadyPerms {
+		p.ok("Claude Code permissions already configured")
+	} else {
+		p.ok("Configured Claude Code permissions for /push-to-remote")
+	}
+
+	// 7. Confirm — waits for user to click button in browser
 	p.confirm(pubKey)
 	<-confirmCh
 
-	// 7. Provision
+	// 8. Provision
 	p.running("Triggering server provisioning…")
 	runURL, err := triggerProvisioning(token, username, pubKey)
 	if err != nil {
