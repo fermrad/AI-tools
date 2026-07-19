@@ -1,12 +1,16 @@
 ---
 name: repo-recon
-description: Survey the fermrad GitHub org and Ferm's Claude guide before proposing or building anything — the local clone is never the source of truth
+description: Read-only survey of the fermrad GitHub org and Ferm's Claude guide before proposing or building anything — loads context and stops; the local clone is never the source of truth
 argument-hint: [app/repo name or topic]
 ---
 
 Run this recon BEFORE proposing solutions or writing code for any Ferm app. Local
 folders (e.g. under `~/localprojects`) are often stale, and their names do not match
 the repo names. GitHub (org `fermrad`) is the source of truth.
+
+**Read-only by design.** Recon loads the guide, the real repo state and any
+overlapping work — then reports and stops (see step 5). It does not begin the
+work it surveys.
 
 ## 1. Refresh and read the Ferm Claude guide
 
@@ -59,9 +63,21 @@ Before building anything new, check whether it already exists in:
 - `infrastructure` — IaC, Caddy routing, DNS, deploys on the Hetzner servers
 - `devhub` — feedback, issues, deploys and roadmap for all apps (also reachable via the DevHub MCP connector)
 
-## 5. Report before you build
+## 5. Report — and then STOP
 
-Give a short recon summary before proposing anything: which repo(s) the task
-concerns, local vs origin state, open PRs/issues/branches that overlap, and
-anything existing (`lib`, `boilerplate`, another app) that already covers the
-need. Only then propose or write code.
+**This skill is read-only. It never starts work.** Its whole job is to load
+context and process so the next decision is well-informed — the decision itself
+belongs to the user.
+
+End with a short recon summary:
+
+- which repo(s) the task concerns, and local vs. origin state
+- open PRs/issues/branches that overlap (someone may already be doing it)
+- anything existing (`lib`, `boilerplate`, another app, an existing playbook or
+  reference implementation) that already covers the need
+- what you'd suggest doing next — as a **proposal**, not a plan you begin executing
+
+Then **hand back to the user and wait.** Do not create branches, edit files, open
+PRs, or run migrations/deploys as part of recon — not even the "obvious first
+step". Recon that slides into implementation defeats its purpose: the user loses
+the review point that the recon exists to create.
