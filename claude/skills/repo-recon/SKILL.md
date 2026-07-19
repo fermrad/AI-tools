@@ -48,6 +48,34 @@ gh pr list -R fermrad/<repo> --state open
 - Local behind origin → pull (or read the missing commits) before drawing any conclusion about the code.
 - An open PR or branch may already implement what you are about to propose.
 
+## 3b. What is NOT committed, pushed or deployed
+
+Work in flight is invisible in `origin/main` and is the easiest thing to destroy
+or duplicate. Establish it explicitly — and report it (step 5) **before** anything
+new is started:
+
+```bash
+git -C <folder> status --porcelain                       # uncommitted changes in the working tree
+git -C <folder> log --oneline @{upstream}..HEAD          # committed locally, NOT pushed
+git -C <folder> branch -a --no-merged origin/main        # branches carrying unmerged work
+gh pr list -R fermrad/<repo> --state open --json number,title,headRefName,isDraft
+```
+
+Then: **is `main` actually deployed?** Merged ≠ running. Compare the commit each
+environment reports against `origin/main`:
+
+```bash
+gh api repos/fermrad/<repo>/commits/main --jq '.sha[:7]'  # what main is
+curl -s https://<app>.ferm.dk/api/health                  # what prod actually runs
+```
+
+Or ask DevHub for all apps and environments at once (`get_overview` via the DevHub
+MCP connector) — it holds both what CI *says* it deployed and what each app
+*reports* running, so a mismatch shows up as drift.
+
+Flag anything you find: uncommitted work someone may lose, a local commit never
+pushed, a merged PR that never reached prod, or a feature living only on a branch.
+
 ## 4. Scan across the org
 
 ```bash
@@ -71,6 +99,14 @@ belongs to the user.
 
 End with a short recon summary:
 
+- **Which environment the work concerns — prod, staging or dev.** Never assume it.
+  If the user hasn't said, **ask before anything is started**; the answer changes
+  the blast radius, whether real data and users are involved, whether a deploy is
+  a `push` or a manual `workflow_dispatch`, and which box you are touching. State
+  the answer explicitly in the report so it is on the record.
+- **Work in flight (from step 3b):** uncommitted changes, commits pushed but not
+  merged, merged work not yet deployed, and features living only on a branch.
+  Say plainly what is at risk of being lost, duplicated or overwritten.
 - which repo(s) the task concerns, and local vs. origin state
 - open PRs/issues/branches that overlap (someone may already be doing it)
 - anything existing (`lib`, `boilerplate`, another app, an existing playbook or
