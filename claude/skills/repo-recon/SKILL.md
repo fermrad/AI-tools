@@ -1,6 +1,6 @@
 ---
 name: repo-recon
-description: Read-only survey of the fermrad GitHub org and Ferm's Claude guide before proposing or building anything — loads context and stops; the local clone is never the source of truth
+description: Read-only survey of the fermrad GitHub org and Ferm's Claude guide before proposing or building anything — loads context and stops; the local clone is never the source of truth. Ends by prescribing the fixed skill flow (/run, /simplify, /code-review, /new-pr, /pr-preview) for the work that follows
 argument-hint: [app/repo name or topic]
 ---
 
@@ -111,9 +111,38 @@ End with a short recon summary:
 - open PRs/issues/branches that overlap (someone may already be doing it)
 - anything existing (`lib`, `boilerplate`, another app, an existing playbook or
   reference implementation) that already covers the need
-- what you'd suggest doing next — as a **proposal**, not a plan you begin executing
+- what you'd suggest doing next — as a **proposal**, not a plan you begin executing.
+  Map the proposal onto the fixed skill flow (step 6): name which skill each
+  suggested step will use, so the session that follows picks them up at the right
+  times.
 
 Then **hand back to the user and wait.** Do not create branches, edit files, open
 PRs, or run migrations/deploys as part of recon — not even the "obvious first
 step". Recon that slides into implementation defeats its purpose: the user loses
 the review point that the recon exists to create.
+
+## 6. The fixed skill flow — recon hands off to it, never around it
+
+Recon is stage 1 of a fixed process. Once the user gives the go-ahead, the work
+that follows uses the other skills at these points — invoke them, don't reimplement
+what they do:
+
+1. **Build** — branch from `main`, develop, and verify the change in the running
+   app with **`/run`** (tests passing is not the same as the app working).
+2. **`/simplify`** — after any substantial change: reuse/simplification pass.
+   Quality only; it does not hunt bugs.
+3. **`/code-review`** — before every PR, on the staged diff. Add
+   **`/security-review`** whenever the change touches auth, sessions, file
+   handling/uploads, or API boundaries.
+4. **`/new-pr`** — creates the PR to Ferm conventions (branch from `main`,
+   code + tests + docs, title format). If the fix lives in code copied from
+   `boilerplate`/`lib` or duplicated across apps: patch upstream first and sweep
+   the other apps (`gh search code --owner fermrad`) in the same flow — a bug
+   fixed in one app still exists in the others.
+5. **`/pr-preview`** — see the branch live before merging. Never debug deploy or
+   CI behavior with guess-commits on `main`; move to a branch with
+   `workflow_dispatch` after two failed attempts and squash the result.
+
+Skipping a stage is the user's call to make, not a default. The recon report's
+proposal (step 5) should already name which of these skills each suggested step
+will use.
