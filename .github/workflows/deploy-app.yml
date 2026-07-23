@@ -1,0 +1,185 @@
+# Genbrugelig deploy for Ferm-apps — kaldes fra hver apps deploy.yml via
+# `uses: fermrad/AI-tools/.github/workflows/deploy-app.yml@main`.
+#
+# Findes fordi juni-julis deploy-udbygning kostede den samme fejlrettelse 4-5
+# gange — én gang pr. app (drop -dev-suffix, NPM_TOKEN-injektion, vendor-sync,
+# SSH-keepalive, public/-sync, GIT_SHA-resolution ...). Workflows var copy-pastet,
+# så hver lærdom skulle genopdages i hvert repo. Her rettes den én gang.
+#
+# Basen er fermrad/project's deploy.yml (den mest gennemrettede). Triggerne
+# (`on: push` med path-filtre, workflow_dispatch) bliver i den kaldende app —
+# de ER app-specifikke. Alt andet parameteriseres.
+#
+# Secrets kommer via `secrets: inherit` — org-secrets har samme navne i alle
+# app-repos (SSH_PRIVATE_KEY, *_SSH_HOST, TAILSCALE_CI_AUTH_KEY, NPM_TOKEN).
+
+name: Deploy Ferm app
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'dev | staging | production'
+        required: true
+        type: string
+      checkout_ref:
+        description: 'Commit/branch der checkes ud og deployes'
+        required: true
+        type: string
+      git_ref:
+        description: 'Ref-navn appen rapporterer til DevHub via /api/health'
+        required: true
+        type: string
+      app_slug:
+        description: 'Kort navn — bruges i backup-filnavne (project, crm, ...)'
+        required: true
+        type: string
+      app_dir:
+        description: 'Deploy-mappe på serveren, fx /opt/ferm-project'
+        required: true
+        type: string
+      sync_path:
+        description: 'Lokal sti der rsync''es (crm har koden i app/)'
+        required: false
+        type: string
+        default: '.'
+      extra_excludes:
+        description: 'Ekstra rsync-excludes, mellemrumssepareret'
+        required: false
+        type: string
+        default: ''
+      db_container:
+        description: 'Postgres-containerens navn (til backup)'
+        required: true
+        type: string
+      db_user:
+        required: true
+        type: string
+      db_name:
+        required: true
+        type: string
+      app_container:
+        description: 'App-containerens navn (til migrations)'
+        required: true
+        type: string
+      staging_app_container:
+        description: 'App-containernavn på staging, hvis det afviger'
+        required: false
+        type: string
+        default: ''
+      compose_file_dev:
+        required: false
+        type: string
+        default: 'docker-compose.dev.yml'
+      compose_file_staging:
+        required: false
+        type: string
+        default: 'docker-compose.staging.yml'
+      compose_file_production:
+        # Default docker-compose.yml er typisk LOKAL DEV (kun db). Uden eksplicit
+        # prod-fil slettede --remove-orphans den håndkørte prod-app som orphan
+        # (project #105, incident 2026-07-17). Derfor er prod-filen et krav om
+        # at være eksplicit — ingen falder tilbage til docker-compose.yml.
+        required: false
+        type: string
+        default: 'docker-compose.production.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_ENV: ${{ inputs.environment }}
+      # Kørende git-ref (branch/tag) — sendes videre til build, så appen kan
+      # rapportere referencen (aflæses af DevHub via /api/health). GIT_SHA sættes
+      # separat efter checkout, se trinnet nedenfor.
+      GIT_REF: ${{ inputs.git_ref }}
+      HOST: ${{ inputs.environment == 'production' && secrets.PRODUCTION_SSH_HOST || inputs.environment == 'dev' && secrets.INTERNAL_DEV_SSH_HOST || secrets.STAGING_SSH_HOST }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.checkout_ref }}
+
+      # github.sha er tom ved workflow_dispatch (måden prod deployes på), så
+      # GIT_SHA ville blive branch-navnet i stedet for commit'en. Læs derfor den
+      # faktisk udcheckede commit, så /api/health rapporterer korrekt SHA til DevHub.
+      - name: Resolve deployed commit SHA
+        run: echo "GIT_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_CI_AUTH_KEY }}
+
+      - name: Setup SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+
+      - name: Ensure app directory exists on persistent volume
+        if: env.DEPLOY_ENV == 'dev'
+        run: |
+          ssh -i ~/.ssh/deploy_key "root@${HOST}" "
+            mkdir -p /mnt/ferm-data${{ inputs.app_dir }}/pgdata
+            mkdir -p /mnt/ferm-data${{ inputs.app_dir }}/data
+            if [ ! -L ${{ inputs.app_dir }} ]; then
+              rm -rf ${{ inputs.app_dir }}
+              ln -sf /mnt/ferm-data${{ inputs.app_dir }} ${{ inputs.app_dir }}
+            fi
+          "
+
+      - name: Backup database
+        if: env.DEPLOY_ENV != 'dev'
+        run: |
+          BACKUP_DIR=$([[ "$DEPLOY_ENV" == "production" ]] && echo "/var/backups/prod" || echo "/var/backups/staging")
+          BACKUP_LABEL=$([[ "$DEPLOY_ENV" == "production" ]] && echo "prod" || echo "staging")
+          ssh -i ~/.ssh/deploy_key "root@${HOST}" \
+            "docker ps --format '{{.Names}}' | grep -q '^${{ inputs.db_container }}$' && \
+              mkdir -p ${BACKUP_DIR} && \
+              docker exec ${{ inputs.db_container }} pg_dump -U ${{ inputs.db_user }} ${{ inputs.db_name }} | gzip > ${BACKUP_DIR}/${{ inputs.app_slug }}-${BACKUP_LABEL}-\$(date +%Y%m%d_%H%M%S).sql.gz \
+            || echo '${{ inputs.db_container }} not running, skipping backup'"
+
+      - name: rsync app to server
+        run: |
+          EXTRA_EXCLUDES=""
+          for e in ${{ inputs.extra_excludes }}; do
+            EXTRA_EXCLUDES="$EXTRA_EXCLUDES --exclude $e"
+          done
+          rsync -az --delete \
+            --exclude 'node_modules' \
+            --exclude '.next' \
+            --exclude '.git' \
+            --exclude '.env*' \
+            --exclude '.DS_Store' \
+            $EXTRA_EXCLUDES \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ${{ inputs.sync_path }} \
+            "root@${HOST}:${{ inputs.app_dir }}/"
+
+      - name: Build and restart containers
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ "$DEPLOY_ENV" == "dev" ]]; then
+            COMPOSE_FLAGS="-f ${{ inputs.compose_file_dev }}"
+          elif [[ "$DEPLOY_ENV" == "staging" ]]; then
+            COMPOSE_FLAGS="-f ${{ inputs.compose_file_staging }}"
+          else
+            COMPOSE_FLAGS="-f ${{ inputs.compose_file_production }}"
+          fi
+          ssh -i ~/.ssh/deploy_key \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            "root@${HOST}" \
+            "docker network create ferm-net 2>/dev/null || true && cd ${{ inputs.app_dir }} && export GIT_SHA='${GIT_SHA}' GIT_REF='${GIT_REF}' && NPM_TOKEN='${NPM_TOKEN}' docker compose ${COMPOSE_FLAGS} up -d --build --force-recreate --remove-orphans"
+
+      - name: Run DB migrations
+        run: |
+          APP_CONTAINER="${{ inputs.app_container }}"
+          if [[ "$DEPLOY_ENV" == "staging" && -n "${{ inputs.staging_app_container }}" ]]; then
+            APP_CONTAINER="${{ inputs.staging_app_container }}"
+          fi
+          ssh -i ~/.ssh/deploy_key "root@${HOST}" \
+            "docker exec ${APP_CONTAINER} npx prisma db push"
