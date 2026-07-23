@@ -76,20 +76,37 @@ Open a pull request for the current branch. Steps:
 
    Do not leave documentation out of sync — docs updates belong in the same PR as the change that made them stale (or a linked follow-up PR when they live in another repo).
 
-7. **Write the PR body** — include:
+7. **Sweep shared code across the org — upstream first.** A bug fixed in one app
+   still exists in every repo that copied the code. June–July 2026 the same
+   deploy fix was made 4-5 times, once per repo, because this step didn't exist.
+   If the change touches code that originates in `boilerplate` or `lib`, is part
+   of the shared deploy workflow, or is visibly copy-pasted between apps (auth,
+   feedback widgets, compose files, CI steps):
+
+   - **Fix upstream first** — `boilerplate`, `lib`, or the shared workflow in
+     `AI-tools` — so the next app doesn't re-inherit the bug.
+   - **Find the other copies:**
+     ```bash
+     gh search code --owner fermrad "<distinctive line from the buggy code>"
+     ```
+   - **Sweep the siblings** as small follow-up PRs (one per repo), and link them
+     in this PR's body so the reviewer can see the class is closed, not just the
+     instance.
+
+8. **Write the PR body** — include:
    - Short bullet summary of what changed and why (not just what — the diff shows that)
    - Test coverage: list the test files added/changed and what they cover
    - Test plan: what a reviewer should check manually (especially for UI)
    - Any migration steps, env var changes, or breaking changes
 
-8. **Create the PR** targeting `main` (there is no `staging` branch — miljøer er servere, ikke brancher):
+9. **Create the PR** targeting `main` (there is no `staging` branch — miljøer er servere, ikke brancher):
    ```bash
    gh pr create --base main --title "<title>" --body-file /tmp/pr-body.txt
    ```
 
-9. **Apply labels** matching the scope and target branch:
+10. **Apply labels** matching the scope and target branch:
    ```bash
    gh pr edit <number> --add-label "<scope>" --add-label "main"
    ```
 
-10. **Confirm** by printing the PR URL.
+11. **Confirm** by printing the PR URL.
