@@ -26,7 +26,7 @@ These rules apply any time you are working with server infrastructure, Docker co
 - **Never run `terraform destroy` on production** without explicit written approval from the tech lead.
 - **Never force-push or hard-reset a branch that CI has already passed** — this breaks the audit trail.
 - **Never modify firewall rules to expose additional ports** without documenting the business reason.
-- **Never kill or restart the shared `ferm-crm-nginx` container** without first verifying a rollback plan — it takes down all six subdomains simultaneously.
+- **Never kill or restart the shared `ferm-caddy` container** without first verifying a rollback plan — it fronts ALL apps on the box simultaneously. Use `caddy reload` (graceful), never a restart, for config changes.
 
 ---
 
@@ -42,10 +42,11 @@ These rules apply any time you are working with server infrastructure, Docker co
 2. **Check for `destroy` actions** in the plan — any resource destruction requires explicit confirmation.
 3. **Use the correct `-var-file`** — applying production tfvars against the staging state file causes cross-environment corruption.
 
-### Before changing Nginx config
-1. **Run `nginx -t`** (inside the container) to validate syntax before reloading.
-2. **Keep a copy of the working config** so you can roll back with a single `scp` if the new config causes a 502/504.
-3. **Use `nginx -s reload`**, not a container restart — reload is graceful (zero dropped connections).
+### Before changing Caddy config
+1. **Change Caddyfiles via `fermrad/infrastructure`** (PR + deploy-workflow) — a hand-edit on the box is silently reverted by the next Caddy-deploy.
+2. **Validate before reload:** `docker exec ferm-caddy caddy validate --config /etc/caddy/Caddyfile`.
+3. **Use `docker exec ferm-caddy caddy reload`**, not a container restart — reload is graceful (zero dropped connections).
+4. **Never `sed -i` a single bind-mounted file** — it creates a new inode, and the container keeps the old one ("config is unchanged" despite the file differing on the host). Write in-place (`>|`) or restart the container.
 
 ### After any production change
 1. **Update `docs/ferm-tech-stack.md`** with a dated entry in the update log.

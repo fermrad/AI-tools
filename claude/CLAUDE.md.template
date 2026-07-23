@@ -46,6 +46,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Deploys mirror the ref exactly** (`rsync --delete`): only `.env` on the server,
   the database, and volumes survive between deploys. Never hand-edit code on a
   server — the next deploy silently reverts it.
+- **Deploy logic lives in the shared workflow** —
+  `fermrad/AI-tools/.github/workflows/deploy-app.yml`. This repo's `deploy.yml`
+  is only triggers + parameters; fix deploy behavior in AI-tools, not here.
 
 ## Project Structure
 
