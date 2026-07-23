@@ -210,14 +210,33 @@ jobs:
 
       - name: Backup database
         if: env.DEPLOY_ENV != 'dev'
+        # En manglende db-container er en gyldig grund til at springe backup over
+        # (første deploy). En pg_dump der FEJLER er det ikke: uden pipefail
+        # returnerer `pg_dump | gzip > fil` 0 og efterlader en ~20 bytes tom .gz,
+        # og deployet ruller videre i troen på at der er taget backup. Hærdet
+        # udgave fra infrastructure-templaten (#214).
         run: |
           BACKUP_DIR=$([[ "$DEPLOY_ENV" == "production" ]] && echo "/var/backups/prod" || echo "/var/backups/staging")
           BACKUP_LABEL=$([[ "$DEPLOY_ENV" == "production" ]] && echo "prod" || echo "staging")
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
-            "docker ps --format '{{.Names}}' | grep -q '^${{ inputs.db_container }}$' && \
-              mkdir -p ${BACKUP_DIR} && \
-              docker exec ${{ inputs.db_container }} pg_dump -U ${{ inputs.db_user }} ${{ inputs.db_name }} | gzip > ${BACKUP_DIR}/${{ inputs.app_slug }}-${BACKUP_LABEL}-\$(date +%Y%m%d_%H%M%S).sql.gz \
-            || echo '${{ inputs.db_container }} not running, skipping backup'"
+            bash -s -- "$BACKUP_DIR" "$BACKUP_LABEL" << 'REMOTE'
+          set -euo pipefail
+          BACKUP_DIR="$1"
+          BACKUP_LABEL="$2"
+          if ! docker ps --format '{{.Names}}' | grep -qx '${{ inputs.db_container }}'; then
+            echo "${{ inputs.db_container }} kører ikke — springer backup over (første deploy?)"
+            exit 0
+          fi
+          mkdir -p "$BACKUP_DIR"
+          OUT="${BACKUP_DIR}/${{ inputs.app_slug }}-${BACKUP_LABEL}-$(date +%Y%m%d_%H%M%S).sql.gz"
+          docker exec ${{ inputs.db_container }} pg_dump -U ${{ inputs.db_user }} ${{ inputs.db_name }} | gzip > "$OUT"
+          # gzip af en tom stream giver stadig ~20 bytes — tjek indholdet, ikke filen.
+          if [ "$(gzip -dc "$OUT" | head -c 1 | wc -c)" -eq 0 ]; then
+            echo "Backup $OUT er tom — pg_dump gav intet output" >&2
+            exit 1
+          fi
+          echo "Backup: $OUT ($(du -h "$OUT" | cut -f1))"
+          REMOTE
 
       - name: rsync app to server
         run: |
