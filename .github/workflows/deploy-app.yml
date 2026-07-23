@@ -6,12 +6,27 @@
 # SSH-keepalive, public/-sync, GIT_SHA-resolution ...). Workflows var copy-pastet,
 # så hver lærdom skulle genopdages i hvert repo. Her rettes den én gang.
 #
-# Basen er fermrad/project's deploy.yml (den mest gennemrettede). Triggerne
-# (`on: push` med path-filtre, workflow_dispatch) bliver i den kaldende app —
-# de ER app-specifikke. Alt andet parameteriseres.
+# Triggerne (`on: push` med path-filtre, workflow_dispatch) bliver i den
+# kaldende app — de ER app-specifikke. Alt andet parameteriseres.
 #
-# Secrets kommer via `secrets: inherit` — org-secrets har samme navne i alle
-# app-repos (SSH_PRIVATE_KEY, *_SSH_HOST, TAILSCALE_CI_AUTH_KEY, NPM_TOKEN).
+# Tre deploy-strategier (vælges med `deploy_strategy`):
+#   up-build       — compose-fil pr. miljø; `up -d --build --force-recreate
+#                    --remove-orphans`; migrationer bagefter i app-containeren.
+#                    (projects model — kræver eksplicit prod-compose-fil, jf.
+#                    project #105/#106: orphan-oprydning sletter ellers alt
+#                    der ikke står i filen.)
+#   build-up       — én compose-fil; `build` (prod: --no-cache --pull, ellers
+#                    --pull) og `up -d` (prod: --force-recreate) hver for sig;
+#                    migrationer bagefter i app-containeren. (crm/area51.)
+#   migrate-first  — byg imaget, (valgfrit) skema-drift-gate, migrér i en
+#                    engangscontainer, og genstart FØRST derefter — den nye
+#                    kode møder aldrig en gammel database, og et tabsgivende
+#                    skema stopper deployet før noget er rørt. (devhubs model,
+#                    jf. devhub #25 og docs/deploy-migrations.md — den bedste;
+#                    nye apps bør vælge den.)
+#
+# Secrets kommer via `secrets: inherit`. Host-secrets kan re-mappes pr. app
+# (area51 bor på de interne bokse, devhubs dev på den offentlige).
 
 name: Deploy Ferm app
 
@@ -31,7 +46,7 @@ on:
         required: true
         type: string
       app_slug:
-        description: 'Kort navn — bruges i backup-filnavne (project, crm, ...)'
+        description: 'Kort navn — backup-filnavne og DevHub-rapportering (project, crm, ...)'
         required: true
         type: string
       app_dir:
@@ -59,7 +74,7 @@ on:
         required: true
         type: string
       app_container:
-        description: 'App-containerens navn (til migrations)'
+        description: 'App-containerens navn (til migrations ved exec-strategierne)'
         required: true
         type: string
       staging_app_container:
@@ -67,6 +82,11 @@ on:
         required: false
         type: string
         default: ''
+      compose_service:
+        description: 'Compose-servicenavn for appen (til migrate-first run --rm)'
+        required: false
+        type: string
+        default: 'app'
       compose_file_dev:
         required: false
         type: string
@@ -83,6 +103,44 @@ on:
         required: false
         type: string
         default: 'docker-compose.production.yml'
+      deploy_strategy:
+        description: 'up-build | build-up | migrate-first (se toppen af filen)'
+        required: false
+        type: string
+        default: 'up-build'
+      schema_drift_gate:
+        description: 'Stop deployet hvis skemaændringen er tabsgivende (kræver scripts/schema-drift.mjs i app-repoet; kun migrate-first)'
+        required: false
+        type: boolean
+        default: false
+      tailscale:
+        description: 'always | dev-only | never — hvornår runneren skal på tailnettet'
+        required: false
+        type: string
+        default: 'always'
+      dev_host_secret:
+        description: 'Navn på org-secret med dev-boksens host'
+        required: false
+        type: string
+        default: 'INTERNAL_DEV_SSH_HOST'
+      staging_host_secret:
+        required: false
+        type: string
+        default: 'STAGING_SSH_HOST'
+      production_host_secret:
+        required: false
+        type: string
+        default: 'PRODUCTION_SSH_HOST'
+      reload_caddy:
+        description: 'never | non-dev | always — genindlæs ferm-caddy efter deploy'
+        required: false
+        type: string
+        default: 'never'
+      ensure_dev_dir:
+        description: 'Sikr app-mappe + symlink på dev-boksens persistente volume'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   deploy:
@@ -93,7 +151,7 @@ jobs:
       # rapportere referencen (aflæses af DevHub via /api/health). GIT_SHA sættes
       # separat efter checkout, se trinnet nedenfor.
       GIT_REF: ${{ inputs.git_ref }}
-      HOST: ${{ inputs.environment == 'production' && secrets.PRODUCTION_SSH_HOST || inputs.environment == 'dev' && secrets.INTERNAL_DEV_SSH_HOST || secrets.STAGING_SSH_HOST }}
+      HOST: ${{ inputs.environment == 'production' && secrets[inputs.production_host_secret] || inputs.environment == 'dev' && secrets[inputs.dev_host_secret] || secrets[inputs.staging_host_secret] }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -105,8 +163,20 @@ jobs:
       - name: Resolve deployed commit SHA
         run: echo "GIT_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
+      # Compose-flag pr. miljø én gang for alle trin.
+      - name: Resolve compose file
+        run: |
+          if [[ "$DEPLOY_ENV" == "dev" ]]; then
+            echo "COMPOSE_FLAGS=-f ${{ inputs.compose_file_dev }}" >> "$GITHUB_ENV"
+          elif [[ "$DEPLOY_ENV" == "staging" ]]; then
+            echo "COMPOSE_FLAGS=-f ${{ inputs.compose_file_staging }}" >> "$GITHUB_ENV"
+          else
+            echo "COMPOSE_FLAGS=-f ${{ inputs.compose_file_production }}" >> "$GITHUB_ENV"
+          fi
+
       - name: Connect to Tailscale
-        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
+        if: inputs.tailscale == 'always' || (inputs.tailscale == 'dev-only' && inputs.environment == 'dev')
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
         with:
           authkey: ${{ secrets.TAILSCALE_CI_AUTH_KEY }}
 
@@ -117,12 +187,19 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+          # Retry-loop fra area51: Tailscale-ruten til interne bokse kan være
+          # sekunder om at komme op — første keyscan må ikke være dødsdommen.
+          # På offentlige bokse rammer første forsøg.
+          for i in $(seq 1 18); do
+            ssh-keyscan -T 5 -H "$HOST" 2>/dev/null | tee -a ~/.ssh/known_hosts | grep -q . && break
+            echo "Attempt $i/18 — waiting for route…"
+            sleep 5
+          done
 
       - name: Ensure app directory exists on persistent volume
-        if: env.DEPLOY_ENV == 'dev'
+        if: env.DEPLOY_ENV == 'dev' && inputs.ensure_dev_dir
         run: |
-          ssh -i ~/.ssh/deploy_key "root@${HOST}" "
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" "
             mkdir -p /mnt/ferm-data${{ inputs.app_dir }}/pgdata
             mkdir -p /mnt/ferm-data${{ inputs.app_dir }}/data
             if [ ! -L ${{ inputs.app_dir }} ]; then
@@ -136,7 +213,7 @@ jobs:
         run: |
           BACKUP_DIR=$([[ "$DEPLOY_ENV" == "production" ]] && echo "/var/backups/prod" || echo "/var/backups/staging")
           BACKUP_LABEL=$([[ "$DEPLOY_ENV" == "production" ]] && echo "prod" || echo "staging")
-          ssh -i ~/.ssh/deploy_key "root@${HOST}" \
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
             "docker ps --format '{{.Names}}' | grep -q '^${{ inputs.db_container }}$' && \
               mkdir -p ${BACKUP_DIR} && \
               docker exec ${{ inputs.db_container }} pg_dump -U ${{ inputs.db_user }} ${{ inputs.db_name }} | gzip > ${BACKUP_DIR}/${{ inputs.app_slug }}-${BACKUP_LABEL}-\$(date +%Y%m%d_%H%M%S).sql.gz \
@@ -155,31 +232,106 @@ jobs:
             --exclude '.env*' \
             --exclude '.DS_Store' \
             $EXTRA_EXCLUDES \
-            -e "ssh -i ~/.ssh/deploy_key" \
+            -e "ssh -i ~/.ssh/deploy_key -o BatchMode=yes" \
             ${{ inputs.sync_path }} \
             "root@${HOST}:${{ inputs.app_dir }}/"
 
+      # ── Strategi: up-build ──────────────────────────────────────────────────
       - name: Build and restart containers
+        if: inputs.deploy_strategy == 'up-build'
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          if [[ "$DEPLOY_ENV" == "dev" ]]; then
-            COMPOSE_FLAGS="-f ${{ inputs.compose_file_dev }}"
-          elif [[ "$DEPLOY_ENV" == "staging" ]]; then
-            COMPOSE_FLAGS="-f ${{ inputs.compose_file_staging }}"
-          else
-            COMPOSE_FLAGS="-f ${{ inputs.compose_file_production }}"
-          fi
           ssh -i ~/.ssh/deploy_key \
-            -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             "root@${HOST}" \
             "docker network create ferm-net 2>/dev/null || true && cd ${{ inputs.app_dir }} && export GIT_SHA='${GIT_SHA}' GIT_REF='${GIT_REF}' && NPM_TOKEN='${NPM_TOKEN}' docker compose ${COMPOSE_FLAGS} up -d --build --force-recreate --remove-orphans"
 
+      # ── Strategier: build-up og migrate-first ───────────────────────────────
+      # Bygger kun imaget. Ved migrate-first hænger den kørende container på sit
+      # gamle image-ID og røres ikke endnu.
+      - name: Build image
+        if: inputs.deploy_strategy != 'up-build'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          BUILD_FLAGS=$([[ "$DEPLOY_ENV" == "production" ]] && echo "--no-cache --pull" || echo "--pull")
+          ssh -i ~/.ssh/deploy_key \
+            -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            "root@${HOST}" \
+            "docker network create ferm-net 2>/dev/null || true && cd ${{ inputs.app_dir }} && export GIT_SHA='${GIT_SHA}' GIT_REF='${GIT_REF}' && NPM_TOKEN='${NPM_TOKEN}' docker compose ${COMPOSE_FLAGS} build ${BUILD_FLAGS}"
+
+      # Porten (devhub #25). Diff'en beregnes med det NYE image (skemaet er bagt
+      # ind) mod den KØRENDE database. Er ændringen tabsgivende, dør deployet her
+      # — før noget er genstartet.
+      - name: Gate — schema drift må ikke være tabsgivende
+        if: inputs.deploy_strategy == 'migrate-first' && inputs.schema_drift_gate
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
+            "cd ${{ inputs.app_dir }} && \
+             docker compose ${COMPOSE_FLAGS} run --rm ${{ inputs.compose_service }} \
+               npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --script" \
+            > drift.sql
+          echo "::group::Skema-drift ($DEPLOY_ENV)"
+          cat drift.sql
+          echo "::endgroup::"
+          node scripts/schema-drift.mjs < drift.sql
+
+      # Migrér FØR genstart i en engangscontainer — den kørende container er urørt.
+      - name: Run DB migrations (before restart)
+        if: inputs.deploy_strategy == 'migrate-first'
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
+            "cd ${{ inputs.app_dir }} && \
+             docker compose ${COMPOSE_FLAGS} run --rm ${{ inputs.compose_service }} \
+               npx prisma db push"
+
+      - name: Start containers
+        if: inputs.deploy_strategy != 'up-build'
+        run: |
+          UP_FLAGS=$([[ "$DEPLOY_ENV" == "production" ]] && echo "--force-recreate" || echo "")
+          ssh -i ~/.ssh/deploy_key \
+            -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            "root@${HOST}" \
+            "cd ${{ inputs.app_dir }} && export GIT_SHA='${GIT_SHA}' GIT_REF='${GIT_REF}' && docker compose ${COMPOSE_FLAGS} up -d ${UP_FLAGS}"
+
+      # Kør db push INDE i app-containeren: dér findes den pinnede prisma-CLI,
+      # prisma.config.ts og DATABASE_URL allerede. En nøgen node-container har
+      # ingen node_modules, så npx trækker nyeste prisma — og en major-version
+      # kan (og har) brækket deployet tavst.
       - name: Run DB migrations
+        if: inputs.deploy_strategy != 'migrate-first'
         run: |
           APP_CONTAINER="${{ inputs.app_container }}"
           if [[ "$DEPLOY_ENV" == "staging" && -n "${{ inputs.staging_app_container }}" ]]; then
             APP_CONTAINER="${{ inputs.staging_app_container }}"
           fi
-          ssh -i ~/.ssh/deploy_key "root@${HOST}" \
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
             "docker exec ${APP_CONTAINER} npx prisma db push"
+
+      - name: Reload Caddy
+        if: inputs.reload_caddy == 'always' || (inputs.reload_caddy == 'non-dev' && inputs.environment != 'dev')
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
+            "docker exec ferm-caddy caddy reload --config /etc/caddy/Caddyfile"
+
+      # Rapportér deployet til DevHub (devhubs mønster, docs/version-patch.md).
+      # Må ALDRIG vælte et deploy — continue-on-error + '|| true', og springes
+      # over hvis secrets ikke er sat i repoet.
+      - name: Report deployment to DevHub
+        if: always()
+        continue-on-error: true
+        env:
+          DEVHUB_URL: ${{ secrets.DEVHUB_URL }}
+          DEVHUB_DEPLOY_TOKEN: ${{ secrets.DEVHUB_DEPLOY_TOKEN }}
+          DEPLOY_STATUS: ${{ job.status }}
+        run: |
+          [ -n "$DEVHUB_URL" ] && [ -n "$DEVHUB_DEPLOY_TOKEN" ] || { echo "DevHub reporting not configured — skipping"; exit 0; }
+          curl -fsS -m 10 -X POST "$DEVHUB_URL/api/deployments" \
+            -H "authorization: Bearer $DEVHUB_DEPLOY_TOKEN" \
+            -H "content-type: application/json" \
+            -d "$(printf '{"app":"%s","env":"%s","sha":"%s","ref":"%s","status":"%s","actor":"%s","runUrl":"%s"}' \
+                  "${{ inputs.app_slug }}" "$DEPLOY_ENV" "$GIT_SHA" "$GIT_REF" "$DEPLOY_STATUS" \
+                  "${{ github.actor }}" \
+                  "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")" \
+            || true
