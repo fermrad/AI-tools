@@ -240,7 +240,11 @@ jobs:
       - name: Build and restart containers
         if: inputs.deploy_strategy == 'up-build'
         env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # NPM_READ_TOKEN er org'ens levende læse-token; NPM_TOKEN døde udløbet
+          # 2026-07-23 og gav 401 i crm's build (eneste app der rammer registret
+          # — resten vendorer). Shell-navnet forbliver NPM_TOKEN, for det er det
+          # Dockerfiles/.npmrc forventer.
+          NPM_TOKEN: ${{ secrets.NPM_READ_TOKEN || secrets.NPM_TOKEN }}
         run: |
           ssh -i ~/.ssh/deploy_key \
             -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
@@ -253,7 +257,11 @@ jobs:
       - name: Build image
         if: inputs.deploy_strategy != 'up-build'
         env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # NPM_READ_TOKEN er org'ens levende læse-token; NPM_TOKEN døde udløbet
+          # 2026-07-23 og gav 401 i crm's build (eneste app der rammer registret
+          # — resten vendorer). Shell-navnet forbliver NPM_TOKEN, for det er det
+          # Dockerfiles/.npmrc forventer.
+          NPM_TOKEN: ${{ secrets.NPM_READ_TOKEN || secrets.NPM_TOKEN }}
         run: |
           BUILD_FLAGS=$([[ "$DEPLOY_ENV" == "production" ]] && echo "--no-cache --pull" || echo "--pull")
           ssh -i ~/.ssh/deploy_key \
