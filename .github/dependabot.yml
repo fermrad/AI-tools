@@ -1,0 +1,9 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Supply-chain-værn: vent 7 dage før nye versioner foreslås.
+    cooldown:
+      default-days: 7
