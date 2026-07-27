@@ -1,6 +1,6 @@
 {
   "name": "fermrad-skills",
-  "description": "Custom workflow skills for Fermrad development — app bootstrapping, PR creation, repo setup, remote sessions, and preview deployments",
+  "description": "Custom workflow skills for Fermrad development — org recon, app bootstrapping, PR creation, repo setup, remote sessions, and preview deployments",
   "author": {
     "name": "Ferm",
     "email": "madsfox@ferm.dk"
