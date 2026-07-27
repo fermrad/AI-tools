@@ -6,6 +6,10 @@ Read this before making changes to this repo.
 
 - **`git pull origin main`** before any work.
 - **All changes go through a PR to `main`** — never commit directly.
+- **Before proposing or building anything in a Ferm app repo, run recon first:**
+  `/repo-recon` on a laptop, `/repo-recon-remote` in a remote session
+  (claude.ai/code, GitHub Actions, mobile). Both are read-only and stop with a
+  report. Skip it for trivial edits — a typo fix does not need an org survey.
 
 ## Purpose
 
@@ -14,6 +18,8 @@ Central repository for AI configuration files, system prompts, and reusable GitH
 ## Repository structure
 
 ```
+.claude/
+  skills/              # Generated copies of claude/skills/ — do not edit (see below)
 claude/
   CLAUDE.md.template   # Base CLAUDE.md template for Ferm app repos
   agents/              # Reusable agent configurations
@@ -30,6 +36,23 @@ openai/                # OpenAI/ChatGPT system prompt templates
 perplexity/            # Perplexity search prompt templates
 scripts/               # Utility scripts
 ```
+
+## Skills: two directories, only one is discovered
+
+`claude/skills/` is the **source of truth and distribution directory** — edit
+skills there. Claude Code does not read it. Discovery happens only in
+`~/.claude/skills/` (installed by `setup-tool` on developer laptops) and
+`<repo>/.claude/skills/` (committed per repo).
+
+Remote sessions never run `setup-tool`, so without the committed copies **no Ferm
+skill is invokable there**. After adding or editing a skill:
+
+```bash
+bash scripts/sync-skills.sh            # refresh this repo's .claude/skills/
+bash scripts/sync-skills.sh <repo>     # and each consuming repo, in its own PR
+```
+
+Never edit `.claude/skills/` directly — the next sync overwrites it.
 
 ## PR workflow
 
