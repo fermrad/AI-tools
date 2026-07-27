@@ -92,6 +92,12 @@ Starts a new Claude remote session on `claude-dev.ferm.dk` (without pushing a lo
 ### `/pr-preview` — `skills/pr-preview/SKILL.md`
 Deploys a PR branch as a live preview environment on the development Hetzner server and posts the preview URL as a PR comment.
 
+### `/repo-recon` — `skills/repo-recon/SKILL.md`
+Read-only survey of the `fermrad` org before proposing or building anything: refreshes the Ferm guide, resolves the real repo behind a local folder, and surfaces work in flight. Reports and stops. **For local sessions with the `gh` CLI.**
+
+### `/repo-recon-remote` — `skills/repo-recon-remote/SKILL.md`
+The same recon for Claude Code remote sessions (claude.ai/code, GitHub Actions, mobile), where there is no `gh` CLI, no developer laptop, and only the repos in session scope. Uses the GitHub and DevHub MCP tools instead, and treats local uncommitted work as an explicit blind spot rather than reporting a clean tree as "nothing in flight".
+
 ---
 
 ## Agents
