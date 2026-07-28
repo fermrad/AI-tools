@@ -28,14 +28,24 @@
 #
 # SQL, som Prisma ikke ejer: `scripts/sql/*.sql`
 #
-# `prisma db push` kender ikke CHECK-constraints, partielle indeks eller
-# triggere, og skema-drift-gaten ser dem heller ikke. De overlever derfor
-# ethvert deploy — men de kommer aldrig af sig selv, så et nyt miljø manglede
-# dem, indtil nogen huskede at køre dem i hånden. Har app-repoet en
-# `scripts/sql/`-mappe, køres filerne i navnesorteret rækkefølge efter
-# `db push`, i alle miljøer. De SKAL være idempotente og additive — se
-# .github/actions/run-sql-scripts/action.yml for hele kontrakten. Ingen mappe =
-# trinnet er en no-op, så apps der ikke bruger det, mærker ingenting.
+# `prisma db push` kender ikke CHECK-constraints og triggere, og
+# skema-drift-gaten ser dem heller ikke. De overlever derfor ethvert deploy —
+# men de kommer aldrig af sig selv, så et nyt miljø manglede dem, indtil nogen
+# huskede at køre dem i hånden. (Indeks er en anden sag: dem MODELLERER Prisma,
+# så et håndlavet indeks, der ikke står i schema.prisma, kan `db push` finde på
+# at droppe igen. Læg ikke indeks her uden at have tjekket netop det.)
+#
+# Kontrakten med app-repoet:
+#   * Mappen findes på SERVEREN som `<app_dir>/scripts/sql/`, altså efter
+#     rsync. For apps med `sync_path: app/` betyder det `app/scripts/sql/` i
+#     repoet. Ligger filerne forkert, er trinnet en tavs no-op.
+#   * Filerne køres i navnesorteret rækkefølge (LC_ALL=C), så 010-, 020- styrer
+#     rækkefølgen.
+#   * De køres ved HVERT deploy, i alle miljøer, og SKAL derfor være
+#     idempotente (`if not exists ...`) og additive. Hver fil køres som én
+#     transaktion, så en fil enten går helt igennem eller slet ikke.
+#   * Ingen mappe = no-op. Ingen app i org'en havde mappen, da trinnet blev
+#     indført, så det er inert, indtil nogen tager det i brug.
 #
 # Secrets kommer via `secrets: inherit`. Host-secrets kan re-mappes pr. app
 # (area51 bor på de interne bokse, devhubs dev på den offentlige).
@@ -328,15 +338,58 @@ jobs:
       # Umiddelbart efter db push og FØR genstart — samme grund som selve
       # migrate-first-strategien: den nye kode må aldrig møde et halvfærdigt
       # skema. En CHECK-constraint er skemaarbejde på lige fod med en kolonne.
+      #
+      # NB: body'en er med vilje IDENTISK med "Run SQL scripts" nedenfor. De to
+      # kan ikke slås sammen (de skal ligge hver sit sted i rækkefølgen), og et
+      # composite action ville koste mere end de sparer: runneren henter ALLE
+      # actions i "Set up job", før noget `if:` er evalueret, så en
+      # `uses: ...@main` ville dels ikke kunne testes fra en branch (den findes
+      # først på main efter merge), dels vælte hver eneste apps deploy — også
+      # dem uden scripts/sql — hvis mappen nogensinde blev flyttet. Rettes den
+      # ene, skal den anden med.
       - name: Run SQL scripts (before restart)
         if: inputs.deploy_strategy == 'migrate-first'
-        uses: fermrad/AI-tools/.github/actions/run-sql-scripts@main
-        with:
-          host: ${{ env.HOST }}
-          app_dir: ${{ inputs.app_dir }}
-          db_container: ${{ inputs.db_container }}
-          db_user: ${{ inputs.db_user }}
-          db_name: ${{ inputs.db_name }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
+            bash -s -- "${{ inputs.app_dir }}" "${{ inputs.db_container }}" \
+                       "${{ inputs.db_user }}" "${{ inputs.db_name }}" << 'REMOTE'
+          set -euo pipefail
+          APP_DIR="$1"; DB_CONTAINER="$2"; DB_USER="$3"; DB_NAME="$4"
+          SQL_DIR="$APP_DIR/scripts/sql"
+
+          if [ ! -d "$SQL_DIR" ]; then
+            echo "Ingen $SQL_DIR — intet SQL at køre."
+            exit 0
+          fi
+
+          # nullglob: en tom mappe skal give en tom liste, ikke den bogstavelige
+          # streng "*.sql", som psql så ville fejle på.
+          shopt -s nullglob
+          FILES=("$SQL_DIR"/*.sql)
+          shopt -u nullglob
+
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "Ingen .sql-filer i $SQL_DIR — intet at køre."
+            exit 0
+          fi
+
+          # LC_ALL=C: samme rækkefølge uanset serverens locale, så et 010-/020-
+          # præfiks også styrer rækkefølgen på en boks med andet sprog.
+          IFS=$'\n' FILES=($(printf '%s\n' "${FILES[@]}" | LC_ALL=C sort))
+
+          for f in "${FILES[@]}"; do
+            echo "── $(basename "$f")"
+            # ON_ERROR_STOP=1 er IKKE valgfri: uden den fortsætter psql efter en
+            # fejl og afslutter med 0, så et brækket script ville rulle videre
+            # som om alt gik godt — endnu et falsk-grønt signal.
+            # --single-transaction gør hver fil atomisk, så et script der fejler
+            # halvvejs ikke efterlader sine første statements committet.
+            docker exec -i "$DB_CONTAINER" \
+              psql -v ON_ERROR_STOP=1 --single-transaction -U "$DB_USER" -d "$DB_NAME" < "$f"
+          done
+
+          echo "${#FILES[@]} SQL-script(s) kørt."
+          REMOTE
 
       - name: Start containers
         if: inputs.deploy_strategy != 'up-build'
@@ -364,15 +417,42 @@ jobs:
       # De gamle strategier migrerer først EFTER genstart — det er hele grunden
       # til at migrate-first findes. SQL'en følger db push, hvor den nu end
       # ligger, så rækkefølgen skema-før-SQL holder i begge tilfælde.
+      # Identisk body med "Run SQL scripts (before restart)" ovenfor — se noten
+      # dér om hvorfor de to ikke er ét composite action.
       - name: Run SQL scripts
         if: inputs.deploy_strategy != 'migrate-first'
-        uses: fermrad/AI-tools/.github/actions/run-sql-scripts@main
-        with:
-          host: ${{ env.HOST }}
-          app_dir: ${{ inputs.app_dir }}
-          db_container: ${{ inputs.db_container }}
-          db_user: ${{ inputs.db_user }}
-          db_name: ${{ inputs.db_name }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
+            bash -s -- "${{ inputs.app_dir }}" "${{ inputs.db_container }}" \
+                       "${{ inputs.db_user }}" "${{ inputs.db_name }}" << 'REMOTE'
+          set -euo pipefail
+          APP_DIR="$1"; DB_CONTAINER="$2"; DB_USER="$3"; DB_NAME="$4"
+          SQL_DIR="$APP_DIR/scripts/sql"
+
+          if [ ! -d "$SQL_DIR" ]; then
+            echo "Ingen $SQL_DIR — intet SQL at køre."
+            exit 0
+          fi
+
+          shopt -s nullglob
+          FILES=("$SQL_DIR"/*.sql)
+          shopt -u nullglob
+
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "Ingen .sql-filer i $SQL_DIR — intet at køre."
+            exit 0
+          fi
+
+          IFS=$'\n' FILES=($(printf '%s\n' "${FILES[@]}" | LC_ALL=C sort))
+
+          for f in "${FILES[@]}"; do
+            echo "── $(basename "$f")"
+            docker exec -i "$DB_CONTAINER" \
+              psql -v ON_ERROR_STOP=1 --single-transaction -U "$DB_USER" -d "$DB_NAME" < "$f"
+          done
+
+          echo "${#FILES[@]} SQL-script(s) kørt."
+          REMOTE
 
       - name: Reload Caddy
         if: inputs.reload_caddy == 'always' || (inputs.reload_caddy == 'non-dev' && inputs.environment != 'dev')
