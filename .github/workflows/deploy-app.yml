@@ -46,6 +46,13 @@
 #     transaktion, så en fil enten går helt igennem eller slet ikke.
 #   * Ingen mappe = no-op. Ingen app i org'en havde mappen, da trinnet blev
 #     indført, så det er inert, indtil nogen tager det i brug.
+#   * App-repoets EGET `paths`-filter skal dække mappen, ellers udløser en ren
+#     SQL-ændring intet deploy: den bliver merged grøn og ruller aldrig ud.
+#     `scripts/**` dækker den (devhub, area51); `app/**` gør det for apps med
+#     `sync_path: app/` (crm). Har filteret hverken, skal `scripts/sql/**`
+#     tilføjes eksplicit — det manglede i project og ramte project#173 samme
+#     dag, mappen blev taget i brug dér. Trinnet kan ikke selv fange det:
+#     filteret bestemmer, om workflowet overhovedet starter.
 #
 # Secrets kommer via `secrets: inherit`. Host-secrets kan re-mappes pr. app
 # (area51 bor på de interne bokse, devhubs dev på den offentlige).
