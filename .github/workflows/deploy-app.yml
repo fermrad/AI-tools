@@ -53,6 +53,12 @@
 #     tilføjes eksplicit — det manglede i project og ramte project#173 samme
 #     dag, mappen blev taget i brug dér. Trinnet kan ikke selv fange det:
 #     filteret bestemmer, om workflowet overhovedet starter.
+#   * Trinnet rammer DB-containeren med `docker exec`, ikke gennem compose, så
+#     den skal hedde det rigtige i HVERT miljø. `db_container` er prod-navnet;
+#     afviger dev eller staging, skal `dev_db_container` /
+#     `staging_db_container` sættes. Gør de ikke det, fejler deployet med
+#     containernavnet i beskeden — det ramte projects staging og dev, indtil
+#     de to inputs fandtes.
 #
 # Secrets kommer via `secrets: inherit`. Host-secrets kan re-mappes pr. app
 # (area51 bor på de interne bokse, devhubs dev på den offentlige).
@@ -108,6 +114,21 @@ on:
         type: string
       staging_app_container:
         description: 'App-containernavn på staging, hvis det afviger'
+        required: false
+        type: string
+        default: ''
+      # db_container er PROD-navnet. Miljøerne har typisk hver sit — hos project
+      # ferm-project-db (dev), ferm-project-staging-db (staging) og
+      # ferm-projects-db (prod) — og SQL-trinnet rammer containeren direkte med
+      # docker exec, ikke gennem compose. Uden de her to kørte det med prod-navnet
+      # i alle miljøer og fejlede med "No such container" på dev og staging.
+      staging_db_container:
+        description: 'DB-containernavn på staging, hvis det afviger'
+        required: false
+        type: string
+        default: ''
+      dev_db_container:
+        description: 'DB-containernavn på dev, hvis det afviger'
         required: false
         type: string
         default: ''
@@ -357,8 +378,15 @@ jobs:
       - name: Run SQL scripts (before restart)
         if: inputs.deploy_strategy == 'migrate-first'
         run: |
+          # db_container er prod-navnet; dev og staging har typisk hver sit.
+          DB_CONTAINER="${{ inputs.db_container }}"
+          if [[ "$DEPLOY_ENV" == "staging" && -n "${{ inputs.staging_db_container }}" ]]; then
+            DB_CONTAINER="${{ inputs.staging_db_container }}"
+          elif [[ "$DEPLOY_ENV" == "dev" && -n "${{ inputs.dev_db_container }}" ]]; then
+            DB_CONTAINER="${{ inputs.dev_db_container }}"
+          fi
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
-            bash -s -- "${{ inputs.app_dir }}" "${{ inputs.db_container }}" \
+            bash -s -- "${{ inputs.app_dir }}" "$DB_CONTAINER" \
                        "${{ inputs.db_user }}" "${{ inputs.db_name }}" << 'REMOTE'
           set -euo pipefail
           APP_DIR="$1"; DB_CONTAINER="$2"; DB_USER="$3"; DB_NAME="$4"
@@ -378,6 +406,14 @@ jobs:
           if [ ${#FILES[@]} -eq 0 ]; then
             echo "Ingen .sql-filer i $SQL_DIR — intet at køre."
             exit 0
+          fi
+
+          # Først her: apps uden scripts/sql skal ikke fejle på en container,
+          # de aldrig får brug for.
+          if ! docker inspect "$DB_CONTAINER" >/dev/null 2>&1; then
+            echo "DB-containeren '$DB_CONTAINER' findes ikke i dette miljø."
+            echo "Sæt dev_db_container / staging_db_container i appens deploy.yml."
+            exit 1
           fi
 
           # LC_ALL=C: samme rækkefølge uanset serverens locale, så et 010-/020-
@@ -429,8 +465,15 @@ jobs:
       - name: Run SQL scripts
         if: inputs.deploy_strategy != 'migrate-first'
         run: |
+          # db_container er prod-navnet; dev og staging har typisk hver sit.
+          DB_CONTAINER="${{ inputs.db_container }}"
+          if [[ "$DEPLOY_ENV" == "staging" && -n "${{ inputs.staging_db_container }}" ]]; then
+            DB_CONTAINER="${{ inputs.staging_db_container }}"
+          elif [[ "$DEPLOY_ENV" == "dev" && -n "${{ inputs.dev_db_container }}" ]]; then
+            DB_CONTAINER="${{ inputs.dev_db_container }}"
+          fi
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
-            bash -s -- "${{ inputs.app_dir }}" "${{ inputs.db_container }}" \
+            bash -s -- "${{ inputs.app_dir }}" "$DB_CONTAINER" \
                        "${{ inputs.db_user }}" "${{ inputs.db_name }}" << 'REMOTE'
           set -euo pipefail
           APP_DIR="$1"; DB_CONTAINER="$2"; DB_USER="$3"; DB_NAME="$4"
@@ -448,6 +491,14 @@ jobs:
           if [ ${#FILES[@]} -eq 0 ]; then
             echo "Ingen .sql-filer i $SQL_DIR — intet at køre."
             exit 0
+          fi
+
+          # Først her: apps uden scripts/sql skal ikke fejle på en container,
+          # de aldrig får brug for.
+          if ! docker inspect "$DB_CONTAINER" >/dev/null 2>&1; then
+            echo "DB-containeren '$DB_CONTAINER' findes ikke i dette miljø."
+            echo "Sæt dev_db_container / staging_db_container i appens deploy.yml."
+            exit 1
           fi
 
           IFS=$'\n' FILES=($(printf '%s\n' "${FILES[@]}" | LC_ALL=C sort))
