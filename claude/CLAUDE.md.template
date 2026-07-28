@@ -58,7 +58,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   **must be idempotent** (`if not exists …`) and additive. The path is the one on
   the server after rsync: if this repo sets `sync_path: app/`, the directory is
   `app/scripts/sql/`. Put them in the wrong place and the step silently does
-  nothing. No directory, no step.
+  nothing. No directory, no step. **And this repo's own `paths:` filter must
+  cover the directory** — otherwise a SQL-only change merges green and never
+  deploys. `scripts/**` covers it, as does `app/**` when `sync_path: app/` is
+  set; with neither, list `scripts/sql/**` explicitly.
 
 ## Project Structure
 
