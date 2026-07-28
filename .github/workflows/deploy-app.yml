@@ -19,11 +19,23 @@
 #                    --pull) og `up -d` (prod: --force-recreate) hver for sig;
 #                    migrationer bagefter i app-containeren. (crm/area51.)
 #   migrate-first  — byg imaget, (valgfrit) skema-drift-gate, migrér i en
-#                    engangscontainer, og genstart FØRST derefter — den nye
-#                    kode møder aldrig en gammel database, og et tabsgivende
-#                    skema stopper deployet før noget er rørt. (devhubs model,
-#                    jf. devhub #25 og docs/deploy-migrations.md — den bedste;
-#                    nye apps bør vælge den.)
+#                    engangscontainer, kør app-repoets SQL-scripts, og genstart
+#                    FØRST derefter — den nye kode møder aldrig en gammel
+#                    database, og et tabsgivende skema stopper deployet før
+#                    noget er rørt. (devhubs model, jf. devhub #25 og
+#                    docs/deploy-migrations.md — den bedste; nye apps bør vælge
+#                    den.)
+#
+# SQL, som Prisma ikke ejer: `scripts/sql/*.sql`
+#
+# `prisma db push` kender ikke CHECK-constraints, partielle indeks eller
+# triggere, og skema-drift-gaten ser dem heller ikke. De overlever derfor
+# ethvert deploy — men de kommer aldrig af sig selv, så et nyt miljø manglede
+# dem, indtil nogen huskede at køre dem i hånden. Har app-repoet en
+# `scripts/sql/`-mappe, køres filerne i navnesorteret rækkefølge efter
+# `db push`, i alle miljøer. De SKAL være idempotente og additive — se
+# .github/actions/run-sql-scripts/action.yml for hele kontrakten. Ingen mappe =
+# trinnet er en no-op, så apps der ikke bruger det, mærker ingenting.
 #
 # Secrets kommer via `secrets: inherit`. Host-secrets kan re-mappes pr. app
 # (area51 bor på de interne bokse, devhubs dev på den offentlige).
@@ -313,6 +325,19 @@ jobs:
              docker compose ${COMPOSE_FLAGS} run --rm ${{ inputs.compose_service }} \
                npx prisma db push"
 
+      # Umiddelbart efter db push og FØR genstart — samme grund som selve
+      # migrate-first-strategien: den nye kode må aldrig møde et halvfærdigt
+      # skema. En CHECK-constraint er skemaarbejde på lige fod med en kolonne.
+      - name: Run SQL scripts (before restart)
+        if: inputs.deploy_strategy == 'migrate-first'
+        uses: fermrad/AI-tools/.github/actions/run-sql-scripts@main
+        with:
+          host: ${{ env.HOST }}
+          app_dir: ${{ inputs.app_dir }}
+          db_container: ${{ inputs.db_container }}
+          db_user: ${{ inputs.db_user }}
+          db_name: ${{ inputs.db_name }}
+
       - name: Start containers
         if: inputs.deploy_strategy != 'up-build'
         run: |
@@ -335,6 +360,19 @@ jobs:
           fi
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
             "docker exec ${APP_CONTAINER} npx prisma db push"
+
+      # De gamle strategier migrerer først EFTER genstart — det er hele grunden
+      # til at migrate-first findes. SQL'en følger db push, hvor den nu end
+      # ligger, så rækkefølgen skema-før-SQL holder i begge tilfælde.
+      - name: Run SQL scripts
+        if: inputs.deploy_strategy != 'migrate-first'
+        uses: fermrad/AI-tools/.github/actions/run-sql-scripts@main
+        with:
+          host: ${{ env.HOST }}
+          app_dir: ${{ inputs.app_dir }}
+          db_container: ${{ inputs.db_container }}
+          db_user: ${{ inputs.db_user }}
+          db_name: ${{ inputs.db_name }}
 
       - name: Reload Caddy
         if: inputs.reload_caddy == 'always' || (inputs.reload_caddy == 'non-dev' && inputs.environment != 'dev')

@@ -49,6 +49,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Deploy logic lives in the shared workflow** —
   `fermrad/AI-tools/.github/workflows/deploy-app.yml`. This repo's `deploy.yml`
   is only triggers + parameters; fix deploy behavior in AI-tools, not here.
+- **SQL that Prisma doesn't own goes in `scripts/sql/*.sql`.** `prisma db push`
+  handles tables, columns, indexes and foreign keys — but not CHECK constraints,
+  partial indexes or triggers, and the schema-drift gate doesn't see them either.
+  Files in `scripts/sql/` run in filename order after `db push`, on every deploy,
+  in every environment. They **must be idempotent** (`if not exists …`) and
+  additive — they run again on the next deploy. No directory, no step.
 
 ## Project Structure
 
