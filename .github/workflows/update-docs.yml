@@ -55,7 +55,7 @@ jobs:
 
       - name: Set up Python
         if: steps.check_key.outputs.skip == 'false'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6.3.0
         with:
           python-version: "3.12"
 
