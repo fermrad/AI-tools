@@ -58,7 +58,8 @@
 #     afviger dev eller staging, skal `dev_db_container` /
 #     `staging_db_container` sættes. Gør de ikke det, fejler deployet med
 #     containernavnet i beskeden — det ramte projects staging og dev, indtil
-#     de to inputs fandtes.
+#     de to inputs fandtes. Backup-trinnet vælger container efter samme regel
+#     (det gjorde det IKKE før S-211, se kommentaren ved "Backup database").
 #
 # Secrets kommer via `secrets: inherit`. Host-secrets kan re-mappes pr. app
 # (area51 bor på de interne bokse, devhubs dev på den offentlige).
@@ -122,6 +123,10 @@ on:
       # ferm-projects-db (prod) — og SQL-trinnet rammer containeren direkte med
       # docker exec, ikke gennem compose. Uden de her to kørte det med prod-navnet
       # i alle miljøer og fejlede med "No such container" på dev og staging.
+      # De bruges af BÅDE backup-trinnet og SQL-trinnene. Backup'en gjorde det
+      # ikke oprindeligt: den brugte prod-navnet i alle miljøer og sprang tavst
+      # over, fordi "container findes ikke" dér var en overspringning frem for
+      # en fejl (S-211).
       staging_db_container:
         description: 'DB-containernavn på staging, hvis det afviger'
         required: false
@@ -260,26 +265,85 @@ jobs:
 
       - name: Backup database
         if: env.DEPLOY_ENV != 'dev'
-        # En manglende db-container er en gyldig grund til at springe backup over
-        # (første deploy). En pg_dump der FEJLER er det ikke: uden pipefail
-        # returnerer `pg_dump | gzip > fil` 0 og efterlader en ~20 bytes tom .gz,
-        # og deployet ruller videre i troen på at der er taget backup. Hærdet
-        # udgave fra infrastructure-templaten (#214).
+        # Trinnet valgte før db_container UBETINGET — altså prod-navnet, også på
+        # staging. SQL-trinnet nedenfor valgte allerede rigtigt mellem de tre
+        # inputs; backup'en brugte bare ikke mekanismen. Resultatet: projects
+        # staging ledte efter ferm-projects-db, fandt den ikke (den hedder
+        # ferm-project-staging-db), skrev "(første deploy?)" og gik grønt —
+        # gennem 210 push-deploys uden backup mellem 16-07 og 08-08-2026 (S-211).
+        #
+        # Derfor skelner trinnet nu mellem to slags "ingen backup", som før så ens ud:
+        #   * INGEN db-container for appen kører        → ægte førstedeploy, spring over (exit 0).
+        #   * Containeren findes under et ANDET navn,
+        #     eller findes og er stoppet                → opsætningsfejl, stop deployet (exit 1)
+        #                                                 FØR det rører databasen.
+        # "Er navnet konfigureret?" duer ikke som skel: crm og devhub sætter
+        # ingen override (deres staging-db hedder tilfældigvis det samme som
+        # prods), så en fremtidig omdøbning dér ville give præcis S-211 igen uden
+        # at nogen havde konfigureret noget forkert. Beviset skal komme fra
+        # maskinen, ikke fra inputtet.
+        #
+        # En pg_dump der FEJLER er heller ikke en gyldig overspringning: uden
+        # pipefail returnerer `pg_dump | gzip > fil` 0 og efterlader en ~20 bytes
+        # tom .gz, og deployet ruller videre i troen på at der er taget backup.
+        # Hærdet udgave fra infrastructure-templaten (#214).
         run: |
           BACKUP_DIR=$([[ "$DEPLOY_ENV" == "production" ]] && echo "/var/backups/prod" || echo "/var/backups/staging")
           BACKUP_LABEL=$([[ "$DEPLOY_ENV" == "production" ]] && echo "prod" || echo "staging")
+          # db_container er prod-navnet; dev og staging har typisk hver sit.
+          # Samme mønster som "Run SQL scripts" — rettes den ene, skal den anden med.
+          DB_CONTAINER="${{ inputs.db_container }}"
+          if [[ "$DEPLOY_ENV" == "staging" && -n "${{ inputs.staging_db_container }}" ]]; then
+            DB_CONTAINER="${{ inputs.staging_db_container }}"
+          elif [[ "$DEPLOY_ENV" == "dev" && -n "${{ inputs.dev_db_container }}" ]]; then
+            DB_CONTAINER="${{ inputs.dev_db_container }}"
+          fi
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
-            bash -s -- "$BACKUP_DIR" "$BACKUP_LABEL" << 'REMOTE'
+            bash -s -- "$BACKUP_DIR" "$BACKUP_LABEL" "$DB_CONTAINER" \
+                       "${{ inputs.app_slug }}" "${{ inputs.db_user }}" "${{ inputs.db_name }}" << 'REMOTE'
           set -euo pipefail
-          BACKUP_DIR="$1"
-          BACKUP_LABEL="$2"
-          if ! docker ps --format '{{.Names}}' | grep -qx '${{ inputs.db_container }}'; then
-            echo "${{ inputs.db_container }} kører ikke — springer backup over (første deploy?)"
+          BACKUP_DIR="$1"; BACKUP_LABEL="$2"; DB_CONTAINER="$3"
+          APP_SLUG="$4"; DB_USER="$5"; DB_NAME="$6"
+
+          # Læs listen ÉN gang i en variabel og match med here-strings.
+          # `docker ps | grep -q` er ikke sikkert her: grep -q afslutter ved
+          # første match, docker kan nå at få SIGPIPE, og med `pipefail` bliver
+          # hele pipelinen så non-zero — altså ser en KØRENDE container fraværende
+          # ud. Det er sjældent og tidsafhængigt, og netop derfor uacceptabelt i
+          # et trin, hvis eneste opgave er at afgøre præcis det spørgsmål.
+          RUNNING="$(docker ps --format '{{.Names}}')"
+
+          if ! grep -qxF "$DB_CONTAINER" <<< "$RUNNING"; then
+            # Kører en ANDEN db-container for appen? Så er navnet forkert for
+            # dette miljø — netop S-211 — og det skal larme, ikke springes over.
+            # Slug'en matches med index(), ikke som regex, så et punktum eller
+            # plus i et app_slug ikke stille udvider hvad der tæller som match.
+            # Det tjek kommer FØRST: står der en gammel, stoppet container under
+            # prod-navnet, mens den rigtige kører under et andet, er "du har
+            # peget på det forkerte navn" den brugbare besked — ikke "start den".
+            OTHERS="$(awk -v s="$APP_SLUG" 'index($0, s) && /-db$/' <<< "$RUNNING")"
+            if [ -n "$OTHERS" ]; then
+              echo "DB-containeren '$DB_CONTAINER' kører ikke, men disse db-containere for '$APP_SLUG' gør:" >&2
+              sed 's/^/  /' <<< "$OTHERS" >&2
+              echo "Miljøet ($BACKUP_LABEL) peger på det forkerte navn — ingen backup taget, deployet stoppet." >&2
+              echo "Sæt staging_db_container / dev_db_container i appens deploy.yml." >&2
+              exit 1
+            fi
+            # Findes den, men kører ikke? Så er stakken sat op før, og det er
+            # ikke et førstedeploy — det er en nede database.
+            if grep -qxF "$DB_CONTAINER" <<< "$(docker ps -a --format '{{.Names}}')"; then
+              echo "DB-containeren '$DB_CONTAINER' findes, men kører ikke — kan ikke tage backup." >&2
+              echo "Start den (docker start $DB_CONTAINER) og kør deployet igen." >&2
+              exit 1
+            fi
+            # Ingen db-container for appen overhovedet: stakken findes ikke endnu.
+            echo "Ingen kørende db-container for '$APP_SLUG' ('$DB_CONTAINER' findes ikke) — førstedeploy, springer backup over."
             exit 0
           fi
+
           mkdir -p "$BACKUP_DIR"
-          OUT="${BACKUP_DIR}/${{ inputs.app_slug }}-${BACKUP_LABEL}-$(date +%Y%m%d_%H%M%S).sql.gz"
-          docker exec ${{ inputs.db_container }} pg_dump -U ${{ inputs.db_user }} ${{ inputs.db_name }} | gzip > "$OUT"
+          OUT="${BACKUP_DIR}/${APP_SLUG}-${BACKUP_LABEL}-$(date +%Y%m%d_%H%M%S).sql.gz"
+          docker exec "$DB_CONTAINER" pg_dump -U "$DB_USER" "$DB_NAME" | gzip > "$OUT"
           # gzip af en tom stream giver stadig ~20 bytes — tjek indholdet, ikke filen.
           if [ "$(gzip -dc "$OUT" | head -c 1 | wc -c)" -eq 0 ]; then
             echo "Backup $OUT er tom — pg_dump gav intet output" >&2

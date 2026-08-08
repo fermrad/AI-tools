@@ -1,0 +1,30 @@
+# Kører testen af deploy-app.yml's backup-trin på PR'er, der rører workflowet
+# eller scriptet selv.
+#
+# Findes fordi repoets eneste CI (claude-conventions-check) kun kigger på
+# `claude/**`. Den delte deploy-workflow — den ene fil, der kan tage backup fra
+# alle Ferm-apps på én gang — havde altså ingen automatiske tjek overhovedet.
+# Det er sådan S-211 kunne leve i tre uger: trinnet valgte forkert container,
+# sprang backup over og rapporterede grønt, og intet kørte nogensinde imod det.
+name: Deploy workflow test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/deploy-app.yml'
+      - '.github/workflows/deploy-workflow-test.yml'
+      - 'scripts/test-deploy-backup.sh'
+
+jobs:
+  backup-step:
+    name: Backup-trinnet i deploy-app.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Workflowet skal være gyldig YAML
+        run: python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/deploy-app.yml'))"
+
+      - name: Test backup-trinnet
+        run: bash scripts/test-deploy-backup.sh
