@@ -69,6 +69,18 @@ run_case() {
   fi
 }
 
+# `docker ps | grep -q` må ikke komme igen. grep -q afslutter ved første match,
+# docker kan nå at få SIGPIPE, og med `set -o pipefail` bliver pipelinen så
+# non-zero — en KØRENDE container ser fraværende ud. Det er tidsafhængigt og
+# derfor ikke noget, en testkørsel pålideligt fanger; her fanges det statisk.
+if grep -vE '^\s*#' "$SCRIPT" | grep -nE 'docker ps[^|]*\|[^|]*grep'; then
+  echo "  FEJL  backup-body'en pipe'r docker ps ind i grep — læs listen ind i en" >&2
+  echo "        variabel og match med <<< i stedet (se linjerne ovenfor)." >&2
+  exit 1
+fi
+echo "  ok    ingen 'docker ps | grep'-pipeline i backup-body'en"
+PASS=$((PASS + 1))
+
 export DUMP_OUTPUT='-- pg_dump
 CREATE TABLE t (id int);'
 
@@ -113,6 +125,18 @@ echo " en stoppet database er ikke et førstedeploy:"
 set_box "ferm-caddy" "ferm-caddy ferm-crm-db"
 run_case "stoppet container fejler i stedet for at springe over" 1 'findes, men kører ikke' \
   staging ferm-crm-db crm crm crm_db
+
+# Gammel prod-navngiven container ligger stoppet tilbage, mens den rigtige
+# kører under staging-navnet. Så er "forkert navn" den brugbare besked —
+# derfor kommer det tjek før stoppet-tjekket.
+set_box "$STAGING_PUBLIC" "$STAGING_PUBLIC ferm-projects-db"
+run_case "stoppet prod-navn + kørende staging-navn -> peger på navnet" 1 'peger på det forkerte navn' \
+  staging ferm-projects-db project projects projects_db
+
+# app_slug matches med index(), ikke som regex.
+set_box "ferm-caddy ferm-x-y-db"
+run_case "slug med regex-tegn matcher ikke bredere end den skal" 0 'førstedeploy' \
+  staging ferm-nyapp-db "x.y" nyapp nyapp_db
 
 echo " tom pg_dump fejler stadig (#214):"
 set_box "$STAGING_PUBLIC"

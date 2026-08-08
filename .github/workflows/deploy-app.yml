@@ -305,22 +305,35 @@ jobs:
           BACKUP_DIR="$1"; BACKUP_LABEL="$2"; DB_CONTAINER="$3"
           APP_SLUG="$4"; DB_USER="$5"; DB_NAME="$6"
 
-          if ! docker ps --format '{{.Names}}' | grep -qx "$DB_CONTAINER"; then
-            # Findes den, men kører ikke? Så er stakken sat op før, og det er
-            # ikke et førstedeploy — det er en nede database.
-            if docker ps -a --format '{{.Names}}' | grep -qx "$DB_CONTAINER"; then
-              echo "DB-containeren '$DB_CONTAINER' findes, men kører ikke — kan ikke tage backup." >&2
-              echo "Start den (docker start $DB_CONTAINER) og kør deployet igen." >&2
-              exit 1
-            fi
+          # Læs listen ÉN gang i en variabel og match med here-strings.
+          # `docker ps | grep -q` er ikke sikkert her: grep -q afslutter ved
+          # første match, docker kan nå at få SIGPIPE, og med `pipefail` bliver
+          # hele pipelinen så non-zero — altså ser en KØRENDE container fraværende
+          # ud. Det er sjældent og tidsafhængigt, og netop derfor uacceptabelt i
+          # et trin, hvis eneste opgave er at afgøre præcis det spørgsmål.
+          RUNNING="$(docker ps --format '{{.Names}}')"
+
+          if ! grep -qxF "$DB_CONTAINER" <<< "$RUNNING"; then
             # Kører en ANDEN db-container for appen? Så er navnet forkert for
             # dette miljø — netop S-211 — og det skal larme, ikke springes over.
-            OTHERS="$(docker ps --format '{{.Names}}' | grep -E "${APP_SLUG}.*-db$" || true)"
+            # Slug'en matches med index(), ikke som regex, så et punktum eller
+            # plus i et app_slug ikke stille udvider hvad der tæller som match.
+            # Det tjek kommer FØRST: står der en gammel, stoppet container under
+            # prod-navnet, mens den rigtige kører under et andet, er "du har
+            # peget på det forkerte navn" den brugbare besked — ikke "start den".
+            OTHERS="$(awk -v s="$APP_SLUG" 'index($0, s) && /-db$/' <<< "$RUNNING")"
             if [ -n "$OTHERS" ]; then
               echo "DB-containeren '$DB_CONTAINER' kører ikke, men disse db-containere for '$APP_SLUG' gør:" >&2
-              echo "$OTHERS" | sed 's/^/  /' >&2
+              sed 's/^/  /' <<< "$OTHERS" >&2
               echo "Miljøet ($BACKUP_LABEL) peger på det forkerte navn — ingen backup taget, deployet stoppet." >&2
               echo "Sæt staging_db_container / dev_db_container i appens deploy.yml." >&2
+              exit 1
+            fi
+            # Findes den, men kører ikke? Så er stakken sat op før, og det er
+            # ikke et førstedeploy — det er en nede database.
+            if grep -qxF "$DB_CONTAINER" <<< "$(docker ps -a --format '{{.Names}}')"; then
+              echo "DB-containeren '$DB_CONTAINER' findes, men kører ikke — kan ikke tage backup." >&2
+              echo "Start den (docker start $DB_CONTAINER) og kør deployet igen." >&2
               exit 1
             fi
             # Ingen db-container for appen overhovedet: stakken findes ikke endnu.
