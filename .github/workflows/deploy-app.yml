@@ -298,12 +298,17 @@ jobs:
           elif [[ "$DEPLOY_ENV" == "dev" && -n "${{ inputs.dev_db_container }}" ]]; then
             DB_CONTAINER="${{ inputs.dev_db_container }}"
           fi
+          # MODE=skip-if-absent: et deploy af en app, der ikke er sat op endnu,
+          # skal kunne køre igennem. Den planlagte backup (backup-db.yml) sender
+          # MODE=require i stedet — dér betyder "ingen database" ikke
+          # førstedeploy, men at en app i drift er væk, og det skal larme.
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
             bash -s -- "$BACKUP_DIR" "$BACKUP_LABEL" "$DB_CONTAINER" \
-                       "${{ inputs.app_slug }}" "${{ inputs.db_user }}" "${{ inputs.db_name }}" << 'REMOTE'
+                       "${{ inputs.app_slug }}" "${{ inputs.db_user }}" "${{ inputs.db_name }}" \
+                       skip-if-absent << 'REMOTE'
           set -euo pipefail
           BACKUP_DIR="$1"; BACKUP_LABEL="$2"; DB_CONTAINER="$3"
-          APP_SLUG="$4"; DB_USER="$5"; DB_NAME="$6"
+          APP_SLUG="$4"; DB_USER="$5"; DB_NAME="$6"; MODE="${7:-skip-if-absent}"
 
           # Læs listen ÉN gang i en variabel og match med here-strings.
           # `docker ps | grep -q` er ikke sikkert her: grep -q afslutter ved
@@ -337,6 +342,15 @@ jobs:
               exit 1
             fi
             # Ingen db-container for appen overhovedet: stakken findes ikke endnu.
+            # Ved et deploy er det et førstedeploy og helt i orden. Ved en
+            # PLANLAGT backup er det ikke: appen er i drift, og at dens database
+            # ikke kører er præcis det, en backup-cron skal opdage. Samme tekst
+            # ville dér betyde "alt vel" om noget, der er galt.
+            if [ "$MODE" = "require" ]; then
+              echo "Ingen kørende db-container for '$APP_SLUG' ('$DB_CONTAINER' findes ikke)." >&2
+              echo "Ved en planlagt backup er det ikke et førstedeploy — der blev ikke taget backup." >&2
+              exit 1
+            fi
             echo "Ingen kørende db-container for '$APP_SLUG' ('$DB_CONTAINER' findes ikke) — førstedeploy, springer backup over."
             exit 0
           fi
