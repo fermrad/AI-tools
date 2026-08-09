@@ -13,18 +13,24 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - '.github/workflows/deploy-app.yml'
+      # backup-db.yml kører den samme backup-krop på en schedule (S-243), og
+      # testen kræver at de to kroppe er identiske. Uden stien her kunne en PR,
+      # der kun rører backup-db.yml, indføre præcis den drift, testen findes for.
+      - '.github/workflows/backup-db.yml'
       - '.github/workflows/deploy-workflow-test.yml'
       - 'scripts/test-deploy-backup.sh'
 
 jobs:
   backup-step:
-    name: Backup-trinnet i deploy-app.yml
+    name: Backup-trinnet i deploy-app.yml og backup-db.yml
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - name: Workflowet skal være gyldig YAML
-        run: python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/deploy-app.yml'))"
+      - name: Workflowene skal være gyldig YAML
+        run: |
+          python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/deploy-app.yml'))"
+          python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/backup-db.yml'))"
 
       - name: Test backup-trinnet
         run: bash scripts/test-deploy-backup.sh

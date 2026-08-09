@@ -19,23 +19,45 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="$REPO_ROOT/.github/workflows/deploy-app.yml"
+# Den planlagte backup (S-243) kører den SAMME krop på en schedule, fordi en app
+# der ikke deployes ellers heller ikke får backup. To kopier af den krop er kun
+# forsvarligt, hvis de ikke kan drive fra hinanden — derfor klippes begge ud og
+# sammenlignes nedenfor, og hele testtabellen køres mod resultatet.
+BACKUP_WORKFLOW="$REPO_ROOT/.github/workflows/backup-db.yml"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 SCRIPT="$TMP/backup-body.sh"
+BACKUP_SCRIPT="$TMP/backup-body-cron.sh"
 
 # --- Klip remote-body'en ud af "Backup database"-trinnet ------------------
-python3 - "$WORKFLOW" "$SCRIPT" <<'PY'
+extract_body() {
+  python3 - "$1" "$2" <<'PY'
 import re, sys
 src = open(sys.argv[1]).read()
-m = re.search(r"bash -s -- \"\$BACKUP_DIR\".*?<< 'REMOTE'\n(.*?)\n\s*REMOTE\n", src, re.S)
+m = re.search(r"bash -s -- \"\$BACKUP_DIR\".*?<< 'REMOTE'.*?\n(.*?)\n\s*REMOTE\n", src, re.S)
 if not m:
-    sys.exit("Kunne ikke finde backup-trinnets REMOTE-heredoc i workflowet.")
+    sys.exit(f"Kunne ikke finde backup-trinnets REMOTE-heredoc i {sys.argv[1]}.")
 body = "\n".join(l[10:] if l.startswith(" " * 10) else l for l in m.group(1).split("\n"))
 if "${{" in body:
     sys.exit("Backup-body'en indeholder ${{ }}-udtryk — så kan den ikke testes. "
              "Send værdien ind som positionsargument i stedet.")
 open(sys.argv[2], "w").write(body + "\n")
 PY
+}
+
+extract_body "$WORKFLOW" "$SCRIPT"
+extract_body "$BACKUP_WORKFLOW" "$BACKUP_SCRIPT"
+
+# Den vigtigste assertion i filen: deploy-backup og den planlagte backup skal
+# køre PRÆCIS den samme kode. Driver de fra hinanden, er det den ene halvdel af
+# backup-dækningen, der stille bliver ringere end den anden.
+if ! diff -u "$SCRIPT" "$BACKUP_SCRIPT" > "$TMP/body.diff"; then
+  echo "FEJL  deploy-app.yml og backup-db.yml har FORSKELLIG backup-krop." >&2
+  echo "      Rettes den ene, skal den anden med — se forskellen:" >&2
+  sed 's/^/      /' "$TMP/body.diff" >&2
+  exit 1
+fi
+echo "  ok    deploy-app.yml og backup-db.yml deler samme backup-krop"
 [ -s "$SCRIPT" ] || exit 1
 
 # --- docker-stub: tilstanden styres via miljøvariabler --------------------
@@ -120,6 +142,24 @@ run_case "ny app uden containere på en boks med andre apps" 0 'førstedeploy' \
 set_box ""
 run_case "ny app på en tom boks" 0 'førstedeploy' \
   staging ferm-nyapp-db nyapp nyapp nyapp_db
+
+# MODE=require: den planlagte backup (backup-db.yml, S-243). Forskellen mod et
+# deploy er hele pointen — "appen er ikke sat op endnu" og "appen i drift har
+# ingen kørende database" ser ens ud for docker, men betyder modsatte ting, når
+# man deployer og når man tager en planlagt backup.
+echo " planlagt backup (MODE=require) må ikke springe over:"
+set_box "$STAGING_PUBLIC"
+run_case "manglende db-container fejler i stedet for at gå grønt" 1 'ikke et førstedeploy' \
+  prod ferm-nyapp-db nyapp nyapp nyapp_db require
+set_box ""
+run_case "tom boks fejler også" 1 'ikke et førstedeploy' \
+  prod ferm-crm-db crm crm crm_db require
+echo " …men tager stadig backup, når databasen er der:"
+set_box "$PROD_PUBLIC"
+run_case "crm/prod tager backup i require-mode" 0 '^Backup: ' \
+  prod ferm-crm-db crm crm crm_db require
+DUMP_OUTPUT="" run_case "tom dump fejler også i require-mode" 1 'er tom' \
+  prod ferm-crm-db crm crm crm_db require
 
 echo " en stoppet database er ikke et førstedeploy:"
 set_box "ferm-caddy" "ferm-caddy ferm-crm-db"

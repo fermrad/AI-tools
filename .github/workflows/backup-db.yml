@@ -1,0 +1,296 @@
+# Planlagt backup af en Ferm-apps database — uafhængigt af deploys.
+#
+# HVORFOR den findes: backup var indtil nu KOBLET TIL DEPLOY. deploy-app.yml
+# tager backup ved hvert deploy til staging og prod, og det trin er hærdet
+# (S-211, #214). Men en app, der ikke bliver deployet, får så heller ingen
+# frisk backup. crm er præcis sådan en app: dens push-trigger rammer kun dev og
+# staging, så PRODUKTION deployes kun ved en manuel workflow_dispatch. Sidste
+# prod-deploy var 29-07-2026, og backup'en derfra var stadig den nyeste, da
+# S-243 blev skrevet elleve dage senere. Intet var i stykker — modellen kunne
+# bare ikke levere andet.
+#
+# Derfor: samme hærdede backup-krop som i deploy-app.yml, men på en schedule.
+# Kroppen er ORD FOR ORD den samme; scripts/test-deploy-backup.sh kræver det og
+# fejler, hvis de to filer begynder at drive fra hinanden. Rettes den ene, SKAL
+# den anden med — det er derfor testen sammenligner dem i stedet for at stole
+# på, at nogen husker det.
+#
+# Den ene forskel er bevidst og sendes ind som MODE:
+#   * deploy-app.yml sender `skip-if-absent` — ingen db-container er et
+#     førstedeploy, og deployet skal kunne køre igennem.
+#   * her sendes `require` — ingen db-container betyder, at en app I DRIFT er
+#     væk. Det er ikke "alt vel", og det skal larme.
+#
+# GitHub Actions-schedule frem for crontab på boksen, samme begrundelse som
+# dbu-sync-cron.yml i project: så står cron'en i source control og er synlig i
+# Actions-fanen, i stedet for at være noget, nogen engang skrev på en server.
+# Ingen af boksene havde i øvrigt nogen backup-cron overhovedet (målt 09-08-2026).
+#
+# EN FEJLET CRON ER TAVS. GitHub mailer kun workflow-ejeren, og den mail drukner
+# — DBU-synken kørte rødt hver time i tre døgn, uden at nogen så det. Derfor
+# åbner et fejlet forsøg ét issue i det KALDENDE repo, som lukker sig selv igen
+# ved næste vellykkede kørsel. Invarianten er: **et åbent alarm-issue betyder
+# "backup'en virker ikke LIGE NU"**. Højst ét ad gangen, ellers holder folk op
+# med at tro på den.
+#
+# BEMÆRK: schedule kører kun fra default-branchen, altså efter merge til main.
+# Og en workflow, der slås fra i Actions-fanen, står `disabled_manually`: så
+# fyrer schedule tavst aldrig igen. Slå den ALDRIG fra for at dæmpe en fejl —
+# luk årsagen, ellers lyver alarmen.
+
+name: Backup Ferm app-database
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'staging | production — dev har ingen data værd at sikre'
+        required: false
+        type: string
+        default: production
+      app_slug:
+        description: 'Kort navn — indgår i backup-filnavnet (project, crm, ...)'
+        required: true
+        type: string
+      db_container:
+        description: 'Postgres-containerens PROD-navn'
+        required: true
+        type: string
+      db_user:
+        required: true
+        type: string
+      db_name:
+        required: true
+        type: string
+      # Samme mekanisme som i deploy-app.yml: prod-navnet er udgangspunktet, og
+      # miljøer med et andet navn sætter deres eget. Uden det ramte backup'en
+      # prod-navnet i alle miljøer — det var S-211.
+      staging_db_container:
+        description: 'DB-containernavn på staging, hvis det afviger'
+        required: false
+        type: string
+        default: ''
+      staging_host_secret:
+        required: false
+        type: string
+        default: 'STAGING_SSH_HOST'
+      production_host_secret:
+        required: false
+        type: string
+        default: 'PRODUCTION_SSH_HOST'
+      tailscale:
+        description: 'always | never — skal runneren på tailnettet for at nå boksen'
+        required: false
+        type: string
+        default: 'never'
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Alarmen skriver et issue i det kaldende repo.
+    permissions:
+      contents: read
+      issues: write
+    # To backups af samme database må ikke overlappe.
+    concurrency:
+      group: backup-${{ inputs.app_slug }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      DEPLOY_ENV: ${{ inputs.environment }}
+      HOST: ${{ inputs.environment == 'production' && secrets[inputs.production_host_secret] || secrets[inputs.staging_host_secret] }}
+    steps:
+      - name: Reject dev
+        # dev-databaser er engangsdata, og dev-boksen ligger bag tailnettet.
+        # Et forkert input skal stoppe her frem for at tage en meningsløs backup.
+        if: inputs.environment != 'staging' && inputs.environment != 'production'
+        run: |
+          echo "environment skal være staging eller production, fik '${{ inputs.environment }}'." >&2
+          exit 1
+
+      - name: Connect to Tailscale
+        if: inputs.tailscale == 'always'
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          authkey: ${{ secrets.TAILSCALE_CI_AUTH_KEY }}
+
+      - name: Setup SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          for i in $(seq 1 18); do
+            ssh-keyscan -T 5 -H "$HOST" 2>/dev/null | tee -a ~/.ssh/known_hosts | grep -q . && break
+            echo "Attempt $i/18 — waiting for route…"
+            sleep 5
+          done
+
+      - name: Backup database
+        # KROPPEN NEDENFOR ER IDENTISK MED deploy-app.yml's "Backup database".
+        # Rediger aldrig kun den ene — scripts/test-deploy-backup.sh sammenligner
+        # dem og fejler på enhver forskel. Hold den også fri for ${{ }}-udtryk:
+        # det er dét, der gør den testbar uden et rigtigt deploy.
+        run: |
+          BACKUP_DIR=$([[ "$DEPLOY_ENV" == "production" ]] && echo "/var/backups/prod" || echo "/var/backups/staging")
+          BACKUP_LABEL=$([[ "$DEPLOY_ENV" == "production" ]] && echo "prod" || echo "staging")
+          DB_CONTAINER="${{ inputs.db_container }}"
+          if [[ "$DEPLOY_ENV" == "staging" && -n "${{ inputs.staging_db_container }}" ]]; then
+            DB_CONTAINER="${{ inputs.staging_db_container }}"
+          fi
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
+            bash -s -- "$BACKUP_DIR" "$BACKUP_LABEL" "$DB_CONTAINER" \
+                       "${{ inputs.app_slug }}" "${{ inputs.db_user }}" "${{ inputs.db_name }}" \
+                       require << 'REMOTE'
+          set -euo pipefail
+          BACKUP_DIR="$1"; BACKUP_LABEL="$2"; DB_CONTAINER="$3"
+          APP_SLUG="$4"; DB_USER="$5"; DB_NAME="$6"; MODE="${7:-skip-if-absent}"
+
+          # Læs listen ÉN gang i en variabel og match med here-strings.
+          # `docker ps | grep -q` er ikke sikkert her: grep -q afslutter ved
+          # første match, docker kan nå at få SIGPIPE, og med `pipefail` bliver
+          # hele pipelinen så non-zero — altså ser en KØRENDE container fraværende
+          # ud. Det er sjældent og tidsafhængigt, og netop derfor uacceptabelt i
+          # et trin, hvis eneste opgave er at afgøre præcis det spørgsmål.
+          RUNNING="$(docker ps --format '{{.Names}}')"
+
+          if ! grep -qxF "$DB_CONTAINER" <<< "$RUNNING"; then
+            # Kører en ANDEN db-container for appen? Så er navnet forkert for
+            # dette miljø — netop S-211 — og det skal larme, ikke springes over.
+            # Slug'en matches med index(), ikke som regex, så et punktum eller
+            # plus i et app_slug ikke stille udvider hvad der tæller som match.
+            # Det tjek kommer FØRST: står der en gammel, stoppet container under
+            # prod-navnet, mens den rigtige kører under et andet, er "du har
+            # peget på det forkerte navn" den brugbare besked — ikke "start den".
+            OTHERS="$(awk -v s="$APP_SLUG" 'index($0, s) && /-db$/' <<< "$RUNNING")"
+            if [ -n "$OTHERS" ]; then
+              echo "DB-containeren '$DB_CONTAINER' kører ikke, men disse db-containere for '$APP_SLUG' gør:" >&2
+              sed 's/^/  /' <<< "$OTHERS" >&2
+              echo "Miljøet ($BACKUP_LABEL) peger på det forkerte navn — ingen backup taget, deployet stoppet." >&2
+              echo "Sæt staging_db_container / dev_db_container i appens deploy.yml." >&2
+              exit 1
+            fi
+            # Findes den, men kører ikke? Så er stakken sat op før, og det er
+            # ikke et førstedeploy — det er en nede database.
+            if grep -qxF "$DB_CONTAINER" <<< "$(docker ps -a --format '{{.Names}}')"; then
+              echo "DB-containeren '$DB_CONTAINER' findes, men kører ikke — kan ikke tage backup." >&2
+              echo "Start den (docker start $DB_CONTAINER) og kør deployet igen." >&2
+              exit 1
+            fi
+            # Ingen db-container for appen overhovedet: stakken findes ikke endnu.
+            # Ved et deploy er det et førstedeploy og helt i orden. Ved en
+            # PLANLAGT backup er det ikke: appen er i drift, og at dens database
+            # ikke kører er præcis det, en backup-cron skal opdage. Samme tekst
+            # ville dér betyde "alt vel" om noget, der er galt.
+            if [ "$MODE" = "require" ]; then
+              echo "Ingen kørende db-container for '$APP_SLUG' ('$DB_CONTAINER' findes ikke)." >&2
+              echo "Ved en planlagt backup er det ikke et førstedeploy — der blev ikke taget backup." >&2
+              exit 1
+            fi
+            echo "Ingen kørende db-container for '$APP_SLUG' ('$DB_CONTAINER' findes ikke) — førstedeploy, springer backup over."
+            exit 0
+          fi
+
+          mkdir -p "$BACKUP_DIR"
+          OUT="${BACKUP_DIR}/${APP_SLUG}-${BACKUP_LABEL}-$(date +%Y%m%d_%H%M%S).sql.gz"
+          docker exec "$DB_CONTAINER" pg_dump -U "$DB_USER" "$DB_NAME" | gzip > "$OUT"
+          # gzip af en tom stream giver stadig ~20 bytes — tjek indholdet, ikke filen.
+          if [ "$(gzip -dc "$OUT" | head -c 1 | wc -c)" -eq 0 ]; then
+            echo "Backup $OUT er tom — pg_dump gav intet output" >&2
+            exit 1
+          fi
+          echo "Backup: $OUT ($(du -h "$OUT" | cut -f1))"
+          REMOTE
+
+      # --- Alarm -----------------------------------------------------------
+      # Begge halvdele skal være der, ellers holder invarianten ikke: uden
+      # oprettelsen er fejlen tavs, og uden lukningen står der et issue tilbage,
+      # som ikke længere passer — og så holder folk op med at læse dem.
+      #
+      # `if: always()` frem for to skridt med failure()/success(): så er det ét
+      # sted, der afgør hvad status betyder, og lukningen kan ikke komme til at
+      # blive sprunget over, fordi et senere trin fejler.
+      - name: Alarm — åbn eller luk issue
+        if: always() && (inputs.environment == 'staging' || inputs.environment == 'production')
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BACKUP_OK: ${{ job.status == 'success' }}
+          APP_SLUG: ${{ inputs.app_slug }}
+          TARGET_ENV: ${{ inputs.environment }}
+        with:
+          script: |
+            const LABEL = "backup-cron";
+            const ok = process.env.BACKUP_OK === "true";
+            const slug = process.env.APP_SLUG;
+            const env = process.env.TARGET_ENV;
+            const TITLE = `Planlagt backup af ${slug} (${env}) fejler`;
+            const { owner, repo } = context.repo;
+            const runUrl =
+              `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            // listForRepo returnerer også pull requests. En PR med labelen på er
+            // ikke en alarm, og talte den som "allerede åben", ville en rigtig
+            // fejl aldrig blive meldt.
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner, repo, state: "open", labels: LABEL, per_page: 100,
+            });
+            const open = issues.find(
+              (i) => !i.pull_request && i.title === TITLE) ?? null;
+
+            if (ok) {
+              if (!open) return;
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: open.number,
+                body: `Backup'en kørte igennem igen — ${runUrl}`,
+              });
+              await github.rest.issues.update({
+                owner, repo, issue_number: open.number, state: "closed",
+              });
+              return;
+            }
+
+            // Højst ét åbent ad gangen. En daglig cron ville ellers lave et nyt
+            // hver dag, så længe fejlen står på.
+            if (open) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: open.number,
+                body: `Fejlede igen — ${runUrl}`,
+              });
+              return;
+            }
+
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: LABEL });
+            } catch (err) {
+              if (err.status !== 404) throw err;
+              await github.rest.issues.createLabel({
+                owner, repo, name: LABEL, color: "d93f0b",
+                description: "Den planlagte databasebackup fejler",
+              });
+            }
+
+            await github.rest.issues.create({
+              owner, repo, labels: [LABEL], title: TITLE,
+              body: [
+                `Den planlagte backup af **${slug}** (${env}) fejlede.`,
+                "",
+                `**Kørsel:** ${runUrl}`,
+                "",
+                "Så længe dette issue er åbent, findes der **ingen frisk backup**",
+                "af databasen. Deploy-backup'en dækker ikke hullet: den tager kun",
+                "backup, når nogen deployer.",
+                "",
+                "**Tjek i denne rækkefølge:**",
+                "",
+                "1. Kører db-containeren på boksen? Jobloggen skriver hvilket navn",
+                "   der blev ledt efter, og hvilke db-containere der faktisk kører.",
+                "2. Hedder containeren noget andet i dette miljø? Så skal",
+                "   `staging_db_container` sættes i appens backup-workflow.",
+                "3. Er der plads på disken? En fuld `/var` giver en afbrudt dump.",
+                "",
+                "Alarmen lukker sig selv, næste gang backup'en kører igennem.",
+                "Slå ikke workflowet fra for at dæmpe den — en workflow, der står",
+                "`disabled_manually`, får aldrig sin schedule til at fyre igen.",
+              ].join("\n"),
+            });
