@@ -245,8 +245,20 @@ jobs:
           # Retry-loop fra area51: Tailscale-ruten til interne bokse kan være
           # sekunder om at komme op — første keyscan må ikke være dødsdommen.
           # På offentlige bokse rammer første forsøg.
+          #
+          # Løkken SKAL sige fra, når den løber tør. Uden `exit 1` returnerede
+          # trinnet `success`, selv når ruten aldrig kom op — og fejlen dukkede
+          # så op ~2 minutter senere som `ssh: connect to host … port 22:
+          # Connection timed out` i et trin, der hedder "Ensure app directory
+          # exists on persistent volume". Det læser som en disk- eller
+          # rettighedsfejl, ikke som en netværksfejl, og kostede reel
+          # fejlsøgningstid i project S-290 (kørsel 31412821397).
           for i in $(seq 1 18); do
             ssh-keyscan -T 5 -H "$HOST" 2>/dev/null | tee -a ~/.ssh/known_hosts | grep -q . && break
+            if [ "$i" -eq 18 ]; then
+              echo "::error title=Ingen rute til $DEPLOY_ENV-boksen::ssh-keyscan nåede aldrig $DEPLOY_ENV-hosten på 18 forsøg (~3 min). Runneren er på tailnettet, men boksen svarer ikke — typisk fordi tailscaled på boksen er sultet af CPU/hukommelse, eller fordi boksen er nede. Se journalctl -u tailscaled på boksen omkring dette tidspunkt."
+              exit 1
+            fi
             echo "Attempt $i/18 — waiting for route…"
             sleep 5
           done
