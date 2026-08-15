@@ -642,6 +642,21 @@ jobs:
         run: |
           # Tokenet er det eneste, der går over stdin — `docker login
           # --password-stdin` er den første og eneste læser.
+          #
+          # Det afsluttende `docker image inspect` er VÆRNET mod et tavst byg på
+          # boksen: imaget skal ligge lokalt, når pullet er færdigt. Uden den
+          # påstand ville et pull, der ikke gav det forventede tag, først vise
+          # sig i drift-gaten — og dér BYGGER `docker compose run` imaget af sig
+          # selv, hvis det mangler. Altså præcis den nedetid, S-349 fjerner, på
+          # det trin der er sværest at få øje på.
+          #
+          # En påstand og ikke et `--no-build`-flag: `docker compose run` kender
+          # ikke det flag (målt 15-08-2026 på staging-boksen: `unknown flag:
+          # --no-build`) — kun `up` gør. En eksistenspåstand virker på enhver
+          # compose-version og fejler desuden tidligere.
+          #
+          # Kommentarer holdes UDEN FOR den fjerne kommandostreng med vilje:
+          # alt inde i den er tekst, en anden maskines shell skal parse.
           printf '%s' "$GHCR_TOKEN" | ssh -i ~/.ssh/deploy_key \
             -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             "root@${HOST}" \
@@ -654,16 +669,6 @@ jobs:
              cd '${APP_DIR}'
              export APP_IMAGE='${APP_IMAGE}'
              docker compose ${COMPOSE_FLAGS} pull '${SERVICE}'
-             # Imaget SKAL ligge lokalt nu. Uden den her påstand ville et pull,
-             # der ikke gav det forventede tag, først vise sig i drift-gaten —
-             # hvor \`docker compose run\` BYGGER imaget af sig selv, hvis det
-             # mangler. Altså præcis den nedetid, S-349 fjerner, på det trin der
-             # er sværest at få øje på.
-             #
-             # Påstanden og ikke et \`--no-build\`-flag: \`docker compose run\`
-             # kender ikke det flag (målt 15-08-2026: 'unknown flag: --no-build'
-             # på staging-boksen) — kun \`up\` gør. En eksistenspåstand virker
-             # på enhver compose-version og fejler DESUDEN tidligere.
              docker image inspect '${APP_IMAGE}' >/dev/null"
 
       # Porten (devhub #25). Diff'en beregnes med det NYE image (skemaet er bagt
