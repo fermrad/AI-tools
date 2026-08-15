@@ -26,6 +26,47 @@
 #                    docs/deploy-migrations.md — den bedste; nye apps bør vælge
 #                    den.)
 #
+# ── Hvor imaget bygges (`build_mode`) ───────────────────────────────────────
+#
+# Strategien ovenfor bestemmer RÆKKEFØLGEN; `build_mode` bestemmer HVOR imaget
+# bygges. De to er uafhængige.
+#
+#   on-host   — default og hidtidig adfærd: `docker compose build` kører på
+#               MÅLSERVEREN over ssh.
+#   registry  — imaget bygges på runneren, pushes til ghcr.io med commit-SHA'en
+#               som tag, og serveren `pull`er det.
+#
+# Hvorfor `registry` findes (project S-349, målt i prod 15-08-2026): et byg på
+# målserveren udsulter den kørende app. Målingen var 13 minutters TOTALT udfald
+# (502 på alt, også forsiden), mens kørslen stod på `Build image` — altså FØR
+# `Start containers`. Nedetiden var altså ikke genstarten; den var byggeriet, og
+# den kom uanset om udrulningen indeholdt en skemaændring eller kun en
+# tekstrettelse. Samme klasse som area51/project S-320 på staging-boksen.
+#
+# `migrate-first`s løfte — "miljøet er urørt, når porten siger nej" — gælder
+# SKEMAET, ikke boksen. `registry` er dét, der får løftet til også at gælde
+# maskinen.
+#
+# Fire ting, `registry` kræver af app-repoet:
+#   * Compose-servicen skal have `image: ${APP_IMAGE:-<lokalt navn>}` ved siden
+#     af sin `build:`. `:-` er ikke pynt: i on-host-tilstand er APP_IMAGE tom,
+#     og servicen skal da falde tilbage på det lokale navn.
+#   * `GIT_SHA`/`GIT_REF` skal stå i compose-filens `environment:`, ikke kun som
+#     build-args. Ét image pr. SHA genbruges på tværs af miljøer, så en værdi,
+#     der er BAGT ind, ville rapportere det første bygs ref for alle senere
+#     udrulninger af samme commit. Runtime-env er allerede dét, appen læser.
+#   * Kaldejobbet skal have `permissions: { contents: read, packages: write }`.
+#     GITHUB_TOKEN i en genbrugsworkflow arver kaldejobbets rettigheder, og uden
+#     `packages: write` kan pushet ikke ske.
+#   * Et NEXT_PUBLIC_*-flag, der læses i en KLIENTkomponent, inlines ved byg og
+#     kan derfor ikke variere pr. miljø, når ét image deles. Læses det kun
+#     server-side (som project gør), er det runtime-env og upåvirket. Tjek det,
+#     før en app skifter — det ser ens ud i koden og er det ikke.
+#
+# `registry` kan ikke kombineres med `up-build`: dén strategi bygger på boksen
+# som en del af sit `up`. Kombinationen afvises i et eget trin frem for at
+# bygge på serveren i tavshed.
+#
 # SQL, som Prisma ikke ejer: `scripts/sql/*.sql`
 #
 # `prisma db push` kender ikke CHECK-constraints og triggere, og
@@ -163,6 +204,24 @@ on:
         required: false
         type: string
         default: 'up-build'
+      build_mode:
+        # on-host er den hidtidige adfærd og forbliver default — ingen app
+        # skifter, før den selv beder om det.
+        description: 'on-host | registry — hvor imaget bygges (se "Hvor imaget bygges" øverst)'
+        required: false
+        type: string
+        default: 'on-host'
+      image_name:
+        description: 'Registry-image UDEN tag. Tom = ghcr.io/<owner>/<repo> for det KALDENDE repo.'
+        required: false
+        type: string
+        default: ''
+      build_args:
+        # GIT_SHA og GIT_REF sættes altid af workflowet selv — skriv dem ikke her.
+        description: 'Ekstra build-args ved registry-byg, én KEY=VALUE pr. linje'
+        required: false
+        type: string
+        default: ''
       schema_drift_gate:
         description: 'Stop deployet hvis skemaændringen er tabsgivende (kræver scripts/schema-drift.mjs i app-repoet; kun migrate-first)'
         required: false
@@ -218,6 +277,36 @@ jobs:
       - name: Resolve deployed commit SHA
         run: echo "GIT_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
+      # Kombinationen kan ikke lade sig gøre: up-build bygger på boksen som en
+      # del af sit `up -d --build`, altså præcis dét, registry findes for at
+      # undgå. Sig fra HER frem for at bygge på serveren i tavshed — en
+      # opsætningsfejl, der ligner en virkende udrulning, er den dyre slags.
+      - name: Gate — registry-byg kræver en strategi, der ikke bygger på boksen
+        if: inputs.build_mode == 'registry' && inputs.deploy_strategy == 'up-build'
+        run: |
+          echo "::error title=build_mode=registry kan ikke kombineres med deploy_strategy=up-build::up-build kører 'docker compose up -d --build' på målserveren og bygger altså imaget dér, uanset at det også er bygget og pushet i CI. Vælg build-up eller migrate-first."
+          exit 1
+
+      # Imagets navn OG tag. Tagget er commit-SHA'en — S-349 kræver, at imaget
+      # versioneres pr. SHA, så en udrulning kan pege på præcis den commit, den
+      # bygger på, og en tilbagerulning kan hente et image, der allerede findes.
+      #
+      # ghcr kræver småt image-navn; org- og repo-navne må gerne have store
+      # bogstaver, så navnet foldes ned frem for at fejle inde i docker.
+      - name: Resolve image reference
+        if: inputs.build_mode == 'registry'
+        run: |
+          NAME="${{ inputs.image_name }}"
+          NAME="${NAME,,}"   # ghcr kræver småt; fold BEGGE veje, ikke kun default-navnet
+          if [ -z "$NAME" ]; then
+            # github.repository er det KALDENDE repo (fermrad/project), ikke
+            # AI-tools — genbrugsworkflows kører i kalderens kontekst. Det er
+            # også dét, der gør, at kalderens GITHUB_TOKEN kan pushe pakken.
+            NAME="ghcr.io/${GITHUB_REPOSITORY,,}"
+          fi
+          echo "APP_IMAGE=${NAME}:${GIT_SHA}" >> "$GITHUB_ENV"
+          echo "Image: ${NAME}:${GIT_SHA}"
+
       # Compose-flag pr. miljø én gang for alle trin.
       - name: Resolve compose file
         run: |
@@ -228,6 +317,93 @@ jobs:
           else
             echo "COMPOSE_FLAGS=-f ${{ inputs.compose_file_production }}" >> "$GITHUB_ENV"
           fi
+
+      # ── Registry-byg: alt her kører på RUNNEREN ────────────────────────────
+      # Placeret FØR tailscale/ssh/backup med vilje. Et byg, der ikke kan lade
+      # sig gøre, skal fejle uden at have rørt målserveren overhovedet — i
+      # on-host-tilstand var en fejlende build allerede efter rsync, altså efter
+      # at koden var lagt ud på boksen.
+      # Findes tagget allerede, bygges der IKKE om — der pulles bare.
+      #
+      # Det er dét, der gør en tilbagerulning til en gammel SHA til en HENTNING
+      # af nøjagtig det image, der kørte dengang. Uden tjekket ville
+      # rollback-vejen bygge commit'en forfra og PUSHE oven i sit eget tag: ghcr
+      # har mutable tags, `FROM node:20-bullseye-slim` er et flydende tag, og
+      # `npm ci` opløser mod det levende register — så "rul tilbage til X" ville
+      # give "X's kildekode bygget I DAG", ikke det image, der kørte. Det er den
+      # slags forskel, man opdager midt i et nedbrud.
+      #
+      # Sidegevinst: en udrulning, der døde i drift-gaten, efterlader et tag i
+      # registret. Uden tjekket ville et senere byg af samme SHA overskrive det
+      # med noget andet; med tjekket er tagget stabilt fra første push.
+      - name: Does the image already exist?
+        if: inputs.build_mode == 'registry'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Rent læse-opslag mod registret — kræver ingen buildx og intet byg.
+          if echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin >/dev/null 2>&1 \
+             && docker manifest inspect "$APP_IMAGE" >/dev/null 2>&1; then
+            echo "IMAGE_EXISTS=true" >> "$GITHUB_ENV"
+            echo "$APP_IMAGE findes allerede — springer byg og push over."
+          else
+            echo "IMAGE_EXISTS=false" >> "$GITHUB_ENV"
+            echo "$APP_IMAGE findes ikke — bygges."
+          fi
+
+      - name: Set up Buildx
+        if: inputs.build_mode == 'registry' && env.IMAGE_EXISTS != 'true'
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to ghcr.io (runner)
+        if: inputs.build_mode == 'registry' && env.IMAGE_EXISTS != 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # Kørslens EGET, kortlivede token — ikke en PAT i en org-secret. Det
+          # udløber med kørslen, så der ligger ingen blivende registry-nøgle
+          # nogen steder, og rettighederne kommer fra kaldejobbets `permissions`.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        if: inputs.build_mode == 'registry' && env.IMAGE_EXISTS != 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ inputs.sync_path }}
+          push: true
+          tags: ${{ env.APP_IMAGE }}
+          # GIT_SHA/GIT_REF sendes med, så et image, der køres UDEN
+          # runtime-env, stadig kan sige hvad det er. Runtime-env vinder —
+          # se noten om `environment:` øverst i filen.
+          #
+          # Læg ALDRIG en hemmelighed her: build-args interpoleres synligt i
+          # kørselsloggen og følger med i imagets metadata. Skal et byg bruge en
+          # hemmelighed (crm's NPM_TOKEN er det eneste tilfælde i huset i dag),
+          # kræver det `secrets:` + `--mount=type=secret` i Dockerfilen — og dét
+          # findes ikke her endnu. Det er derfor, crm ikke kan skifte til
+          # registry uden videre.
+          build-args: |
+            GIT_SHA=${{ env.GIT_SHA }}
+            GIT_REF=${{ env.GIT_REF }}
+            ${{ inputs.build_args }}
+          # PRODUKTION BYGGER RENT. On-host-vejen har altid sendt
+          # `--no-cache --pull` for prod (se "Build image" nedenfor), og den
+          # hygiejne må ikke falde bort, bare fordi bygget flyttede.
+          #
+          # Uden den ville prod-imaget kunne samles af lag, en dev- eller
+          # staging-kørsel har lagt i cachen: `Deploy project` kan dispatches med
+          # `environment: dev` og en VILKÅRLIG ref, og med `mode=max` eksporteres
+          # hvert mellemlag. Den næste prod-udrulning ville så restore dem — en
+          # rute fra en uskyldigt udseende dev-dispatch ind i prod-imaget, hvor
+          # selve prod-kørslen ser helt normal ud.
+          no-cache: ${{ inputs.environment == 'production' }}
+          pull: ${{ inputs.environment == 'production' }}
+          # Og cachen er pr. app OG MILJØ. Et fælles scope ville lade de to
+          # miljøer skrive i hinandens cache — samme rute som ovenfor, bare uden
+          # at nogen behøvede at dispatche noget.
+          cache-from: type=gha,scope=${{ inputs.app_slug }}-${{ inputs.environment }}
+          cache-to: ${{ inputs.environment == 'production' && '' || format('type=gha,mode=max,scope={0}-{1}', inputs.app_slug, inputs.environment) }}
 
       - name: Connect to Tailscale
         if: inputs.tailscale == 'always' || (inputs.tailscale == 'dev-only' && inputs.environment == 'dev')
@@ -414,7 +590,7 @@ jobs:
       # Bygger kun imaget. Ved migrate-first hænger den kørende container på sit
       # gamle image-ID og røres ikke endnu.
       - name: Build image
-        if: inputs.deploy_strategy != 'up-build'
+        if: inputs.deploy_strategy != 'up-build' && inputs.build_mode != 'registry'
         env:
           # NPM_READ_TOKEN er org'ens levende læse-token; NPM_TOKEN døde udløbet
           # 2026-07-23 og gav 401 i crm's build (eneste app der rammer registret
@@ -428,14 +604,87 @@ jobs:
             "root@${HOST}" \
             "docker network create ferm-net 2>/dev/null || true && cd ${{ inputs.app_dir }} && export GIT_SHA='${GIT_SHA}' GIT_REF='${GIT_REF}' && NPM_TOKEN='${NPM_TOKEN}' docker compose ${COMPOSE_FLAGS} build ${BUILD_FLAGS}"
 
+      # ── Registry: hent imaget i stedet for at bygge det ────────────────────
+      # Erstatter trinnet ovenfor. Nedetiden falder fra "byggeriet udsulter
+      # boksen" til "et pull, mens den gamle container kører videre".
+      #
+      # Login, pull og oprydning ligger i ÉT trin med vilje. Nøglen skal ligge
+      # på maskinen i så kort tid som muligt, og alt efter pullet (drift-gate,
+      # db push, `up -d`) bruger et image, der allerede er lokalt —
+      # registret er der ikke brug for igen. Lå oprydningen til sidst i jobbet,
+      # var vinduet hele udrulningen i stedet for de sekunder, et pull tager.
+      #
+      # Tre ting om hemmeligheden, og de er alle tre bevidste:
+      #   * Tokenet går over STDIN, aldrig i argv — en kommandolinje kan læses
+      #     af enhver med adgang til boksens procesliste.
+      #   * EGEN docker-config-mappe pr. app (`DOCKER_CONFIG`). Boksene deles:
+      #     dev kører project + crm + area51, og `concurrency`-gruppen er pr.
+      #     app, så to udrulninger kan overlappe. Med den fælles
+      #     /root/.docker/config.json ville den enes `docker logout` rive den
+      #     andens nøgle væk MIDT i et pull — en flaky 401, ingen kunne
+      #     forklare — og mens begge var logget ind, ville den sidste login
+      #     gælde for dem begge.
+      #   * Mappen SLETTES frem for at blive `docker logout`'et. En sletning kan
+      #     ikke efterlade en post, og `trap` sikrer, at den også sker, når
+      #     pullet fejler.
+      - name: Pull image on server
+        if: inputs.build_mode == 'registry'
+        env:
+          # Via `env:` frem for `${{ }}` direkte i kommandostrengen. Actions
+          # interpolerer `${{ }}` som TEKST, før bash ser linjen, så en værdi med
+          # et citationstegn ville kunne bryde ud og køre som root på boksen.
+          # Som miljøvariabler udvides de af runnerens bash i stedet.
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_DIR: ${{ inputs.app_dir }}
+          ACTOR: ${{ github.actor }}
+          SERVICE: ${{ inputs.compose_service }}
+          SLUG: ${{ inputs.app_slug }}
+        run: |
+          # Tokenet er det eneste, der går over stdin — `docker login
+          # --password-stdin` er den første og eneste læser.
+          #
+          # Det afsluttende `docker image inspect` er VÆRNET mod et tavst byg på
+          # boksen: imaget skal ligge lokalt, når pullet er færdigt. Uden den
+          # påstand ville et pull, der ikke gav det forventede tag, først vise
+          # sig i drift-gaten — og dér BYGGER `docker compose run` imaget af sig
+          # selv, hvis det mangler. Altså præcis den nedetid, S-349 fjerner, på
+          # det trin der er sværest at få øje på.
+          #
+          # En påstand og ikke et `--no-build`-flag: `docker compose run` kender
+          # ikke det flag (målt 15-08-2026 på staging-boksen: `unknown flag:
+          # --no-build`) — kun `up` gør. En eksistenspåstand virker på enhver
+          # compose-version og fejler desuden tidligere.
+          #
+          # Kommentarer holdes UDEN FOR den fjerne kommandostreng med vilje:
+          # alt inde i den er tekst, en anden maskines shell skal parse.
+          printf '%s' "$GHCR_TOKEN" | ssh -i ~/.ssh/deploy_key \
+            -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            "root@${HOST}" \
+            "set -e
+             export DOCKER_CONFIG=/root/.docker-deploy-${SLUG}
+             trap 'rm -rf \"\$DOCKER_CONFIG\"' EXIT
+             install -d -m 700 \"\$DOCKER_CONFIG\"
+             docker login ghcr.io -u '${ACTOR}' --password-stdin
+             docker network create ferm-net 2>/dev/null || true
+             cd '${APP_DIR}'
+             export APP_IMAGE='${APP_IMAGE}'
+             docker compose ${COMPOSE_FLAGS} pull '${SERVICE}'
+             docker image inspect '${APP_IMAGE}' >/dev/null"
+
       # Porten (devhub #25). Diff'en beregnes med det NYE image (skemaet er bagt
       # ind) mod den KØRENDE database. Er ændringen tabsgivende, dør deployet her
       # — før noget er genstartet.
       - name: Gate — schema drift må ikke være tabsgivende
         if: inputs.deploy_strategy == 'migrate-first' && inputs.schema_drift_gate
         run: |
+          # APP_IMAGE eksporteres i HVERT compose-kald, ikke kun ved pull.
+          # Compose-servicen slår op i `${APP_IMAGE:-<lokalt navn>}`, så en
+          # glemt eksport ville tavst køre engangscontaineren på det GAMLE,
+          # lokale image — altså regne driften på et andet skema end det, der
+          # skal rulles ud. I on-host-tilstand er variablen tom, og `:-`
+          # leverer det lokale navn som hidtil.
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
-            "cd ${{ inputs.app_dir }} && \
+            "cd ${{ inputs.app_dir }} && export APP_IMAGE='${APP_IMAGE}' && \
              docker compose ${COMPOSE_FLAGS} run --rm ${{ inputs.compose_service }} \
                npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --script" \
             > drift.sql
@@ -449,7 +698,7 @@ jobs:
         if: inputs.deploy_strategy == 'migrate-first'
         run: |
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
-            "cd ${{ inputs.app_dir }} && \
+            "cd ${{ inputs.app_dir }} && export APP_IMAGE='${APP_IMAGE}' && \
              docker compose ${COMPOSE_FLAGS} run --rm ${{ inputs.compose_service }} \
                npx prisma db push"
 
@@ -528,10 +777,13 @@ jobs:
         if: inputs.deploy_strategy != 'up-build'
         run: |
           UP_FLAGS=$([[ "$DEPLOY_ENV" == "production" ]] && echo "--force-recreate" || echo "")
+          # Bemærk: intet `--no-build` her. Værnet mod et tavst on-host-byg er
+          # eksistenspåstanden i "Pull image on server" — den virker på enhver
+          # compose-version og fejler tidligere. Se noten dér.
           ssh -i ~/.ssh/deploy_key \
             -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             "root@${HOST}" \
-            "cd ${{ inputs.app_dir }} && export GIT_SHA='${GIT_SHA}' GIT_REF='${GIT_REF}' && docker compose ${COMPOSE_FLAGS} up -d ${UP_FLAGS}"
+            "cd ${{ inputs.app_dir }} && export GIT_SHA='${GIT_SHA}' GIT_REF='${GIT_REF}' APP_IMAGE='${APP_IMAGE}' && docker compose ${COMPOSE_FLAGS} up -d ${UP_FLAGS}"
 
       # Kør db push INDE i app-containeren: dér findes den pinnede prisma-CLI,
       # prisma.config.ts og DATABASE_URL allerede. En nøgen node-container har
@@ -601,6 +853,11 @@ jobs:
 
           echo "${#FILES[@]} SQL-script(s) kørt."
           REMOTE
+
+      # (Registry-nøglen ryddes i "Pull image on server" — se `trap` dér. Der er
+      # med vilje IKKE et logout-trin her til sidst: nøglen skal ikke ligge på
+      # boksen gennem drift-gate, migrationer og genstart, når intet efter
+      # pullet har brug for registret.)
 
       - name: Reload Caddy
         if: inputs.reload_caddy == 'always' || (inputs.reload_caddy == 'non-dev' && inputs.environment != 'dev')
