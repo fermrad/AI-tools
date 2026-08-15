@@ -297,6 +297,7 @@ jobs:
         if: inputs.build_mode == 'registry'
         run: |
           NAME="${{ inputs.image_name }}"
+          NAME="${NAME,,}"   # ghcr kræver småt; fold BEGGE veje, ikke kun default-navnet
           if [ -z "$NAME" ]; then
             # github.repository er det KALDENDE repo (fermrad/project), ikke
             # AI-tools — genbrugsworkflows kører i kalderens kontekst. Det er
@@ -322,12 +323,40 @@ jobs:
       # sig gøre, skal fejle uden at have rørt målserveren overhovedet — i
       # on-host-tilstand var en fejlende build allerede efter rsync, altså efter
       # at koden var lagt ud på boksen.
-      - name: Set up Buildx
+      # Findes tagget allerede, bygges der IKKE om — der pulles bare.
+      #
+      # Det er dét, der gør en tilbagerulning til en gammel SHA til en HENTNING
+      # af nøjagtig det image, der kørte dengang. Uden tjekket ville
+      # rollback-vejen bygge commit'en forfra og PUSHE oven i sit eget tag: ghcr
+      # har mutable tags, `FROM node:20-bullseye-slim` er et flydende tag, og
+      # `npm ci` opløser mod det levende register — så "rul tilbage til X" ville
+      # give "X's kildekode bygget I DAG", ikke det image, der kørte. Det er den
+      # slags forskel, man opdager midt i et nedbrud.
+      #
+      # Sidegevinst: en udrulning, der døde i drift-gaten, efterlader et tag i
+      # registret. Uden tjekket ville et senere byg af samme SHA overskrive det
+      # med noget andet; med tjekket er tagget stabilt fra første push.
+      - name: Does the image already exist?
         if: inputs.build_mode == 'registry'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Rent læse-opslag mod registret — kræver ingen buildx og intet byg.
+          if echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin >/dev/null 2>&1 \
+             && docker manifest inspect "$APP_IMAGE" >/dev/null 2>&1; then
+            echo "IMAGE_EXISTS=true" >> "$GITHUB_ENV"
+            echo "$APP_IMAGE findes allerede — springer byg og push over."
+          else
+            echo "IMAGE_EXISTS=false" >> "$GITHUB_ENV"
+            echo "$APP_IMAGE findes ikke — bygges."
+          fi
+
+      - name: Set up Buildx
+        if: inputs.build_mode == 'registry' && env.IMAGE_EXISTS != 'true'
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to ghcr.io (runner)
-        if: inputs.build_mode == 'registry'
+        if: inputs.build_mode == 'registry' && env.IMAGE_EXISTS != 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -338,7 +367,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push image
-        if: inputs.build_mode == 'registry'
+        if: inputs.build_mode == 'registry' && env.IMAGE_EXISTS != 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ${{ inputs.sync_path }}
@@ -347,14 +376,34 @@ jobs:
           # GIT_SHA/GIT_REF sendes med, så et image, der køres UDEN
           # runtime-env, stadig kan sige hvad det er. Runtime-env vinder —
           # se noten om `environment:` øverst i filen.
+          #
+          # Læg ALDRIG en hemmelighed her: build-args interpoleres synligt i
+          # kørselsloggen og følger med i imagets metadata. Skal et byg bruge en
+          # hemmelighed (crm's NPM_TOKEN er det eneste tilfælde i huset i dag),
+          # kræver det `secrets:` + `--mount=type=secret` i Dockerfilen — og dét
+          # findes ikke her endnu. Det er derfor, crm ikke kan skifte til
+          # registry uden videre.
           build-args: |
             GIT_SHA=${{ env.GIT_SHA }}
             GIT_REF=${{ env.GIT_REF }}
             ${{ inputs.build_args }}
-          # Cachen er pr. app, ikke pr. miljø: samme commit giver samme image,
-          # så en staging-udrulning varmer prod-udrulningen af samme SHA.
-          cache-from: type=gha,scope=${{ inputs.app_slug }}
-          cache-to: type=gha,mode=max,scope=${{ inputs.app_slug }}
+          # PRODUKTION BYGGER RENT. On-host-vejen har altid sendt
+          # `--no-cache --pull` for prod (se "Build image" nedenfor), og den
+          # hygiejne må ikke falde bort, bare fordi bygget flyttede.
+          #
+          # Uden den ville prod-imaget kunne samles af lag, en dev- eller
+          # staging-kørsel har lagt i cachen: `Deploy project` kan dispatches med
+          # `environment: dev` og en VILKÅRLIG ref, og med `mode=max` eksporteres
+          # hvert mellemlag. Den næste prod-udrulning ville så restore dem — en
+          # rute fra en uskyldigt udseende dev-dispatch ind i prod-imaget, hvor
+          # selve prod-kørslen ser helt normal ud.
+          no-cache: ${{ inputs.environment == 'production' }}
+          pull: ${{ inputs.environment == 'production' }}
+          # Og cachen er pr. app OG MILJØ. Et fælles scope ville lade de to
+          # miljøer skrive i hinandens cache — samme rute som ovenfor, bare uden
+          # at nogen behøvede at dispatche noget.
+          cache-from: type=gha,scope=${{ inputs.app_slug }}-${{ inputs.environment }}
+          cache-to: ${{ inputs.environment == 'production' && '' || format('type=gha,mode=max,scope={0}-{1}', inputs.app_slug, inputs.environment) }}
 
       - name: Connect to Tailscale
         if: inputs.tailscale == 'always' || (inputs.tailscale == 'dev-only' && inputs.environment == 'dev')
@@ -559,26 +608,52 @@ jobs:
       # Erstatter trinnet ovenfor. Nedetiden falder fra "byggeriet udsulter
       # boksen" til "et pull, mens den gamle container kører videre".
       #
-      # Tokenet går over STDIN, aldrig i argv: en kommandolinje kan læses af
-      # enhver med adgang til boksens proceslise, mens ssh-stdin ikke kan.
-      # Det er kørslens eget, kortlivede token — der bliver ikke lagt en
-      # blivende registry-nøgle på maskinen.
-      - name: Log in to ghcr.io (server)
-        if: inputs.build_mode == 'registry'
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          printf '%s' "$GHCR_TOKEN" | ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
-            "root@${HOST}" \
-            "docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
-
+      # Login, pull og oprydning ligger i ÉT trin med vilje. Nøglen skal ligge
+      # på maskinen i så kort tid som muligt, og alt efter pullet (drift-gate,
+      # db push, `up -d --no-build`) bruger et image, der allerede er lokalt —
+      # registret er der ikke brug for igen. Lå oprydningen til sidst i jobbet,
+      # var vinduet hele udrulningen i stedet for de sekunder, et pull tager.
+      #
+      # Tre ting om hemmeligheden, og de er alle tre bevidste:
+      #   * Tokenet går over STDIN, aldrig i argv — en kommandolinje kan læses
+      #     af enhver med adgang til boksens procesliste.
+      #   * EGEN docker-config-mappe pr. app (`DOCKER_CONFIG`). Boksene deles:
+      #     dev kører project + crm + area51, og `concurrency`-gruppen er pr.
+      #     app, så to udrulninger kan overlappe. Med den fælles
+      #     /root/.docker/config.json ville den enes `docker logout` rive den
+      #     andens nøgle væk MIDT i et pull — en flaky 401, ingen kunne
+      #     forklare — og mens begge var logget ind, ville den sidste login
+      #     gælde for dem begge.
+      #   * Mappen SLETTES frem for at blive `docker logout`'et. En sletning kan
+      #     ikke efterlade en post, og `trap` sikrer, at den også sker, når
+      #     pullet fejler.
       - name: Pull image on server
         if: inputs.build_mode == 'registry'
+        env:
+          # Via `env:` frem for `${{ }}` direkte i kommandostrengen. Actions
+          # interpolerer `${{ }}` som TEKST, før bash ser linjen, så en værdi med
+          # et citationstegn ville kunne bryde ud og køre som root på boksen.
+          # Som miljøvariabler udvides de af runnerens bash i stedet.
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_DIR: ${{ inputs.app_dir }}
+          ACTOR: ${{ github.actor }}
+          SERVICE: ${{ inputs.compose_service }}
+          SLUG: ${{ inputs.app_slug }}
         run: |
-          ssh -i ~/.ssh/deploy_key \
+          # Tokenet er det eneste, der går over stdin — `docker login
+          # --password-stdin` er den første og eneste læser.
+          printf '%s' "$GHCR_TOKEN" | ssh -i ~/.ssh/deploy_key \
             -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             "root@${HOST}" \
-            "docker network create ferm-net 2>/dev/null || true && cd ${{ inputs.app_dir }} && export APP_IMAGE='${APP_IMAGE}' && docker compose ${COMPOSE_FLAGS} pull ${{ inputs.compose_service }}"
+            "set -e
+             export DOCKER_CONFIG=/root/.docker-deploy-${SLUG}
+             trap 'rm -rf \"\$DOCKER_CONFIG\"' EXIT
+             install -d -m 700 \"\$DOCKER_CONFIG\"
+             docker login ghcr.io -u '${ACTOR}' --password-stdin
+             docker network create ferm-net 2>/dev/null || true
+             cd '${APP_DIR}'
+             export APP_IMAGE='${APP_IMAGE}'
+             docker compose ${COMPOSE_FLAGS} pull '${SERVICE}'"
 
       # Porten (devhub #25). Diff'en beregnes med det NYE image (skemaet er bagt
       # ind) mod den KØRENDE database. Er ændringen tabsgivende, dør deployet her
@@ -592,9 +667,23 @@ jobs:
           # lokale image — altså regne driften på et andet skema end det, der
           # skal rulles ud. I on-host-tilstand er variablen tom, og `:-`
           # leverer det lokale navn som hidtil.
+          # RUN_FLAGS: `docker compose run` BYGGER af sig selv, hvis imaget mangler
+          # lokalt. Falder pullet uden om (forkert tag, omdøbt service), ville
+          # boksen altså bygge imaget her — præcis den nedetid, S-349 fjerner, og
+          # på det trin, der er sværest at få øje på. `--no-build` gør det til en
+          # fejl i stedet.
+          # `if`-blok og IKKE `[[ … ]] && VAR=x`: GitHub kører run-blokke med
+          # `bash -e`, og en AND-liste, hvis første led er falsk, returnerer
+          # non-zero som samlet sætning — altså ville trinnet ABORTERE for
+          # enhver app i on-host-tilstand. Klassikeren, og den fejler først hos
+          # de andre apps, ikke her.
+          RUN_FLAGS=""
+          if [[ "${{ inputs.build_mode }}" == "registry" ]]; then
+            RUN_FLAGS="--no-build"
+          fi
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
             "cd ${{ inputs.app_dir }} && export APP_IMAGE='${APP_IMAGE}' && \
-             docker compose ${COMPOSE_FLAGS} run --rm ${{ inputs.compose_service }} \
+             docker compose ${COMPOSE_FLAGS} run --rm ${RUN_FLAGS} ${{ inputs.compose_service }} \
                npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --script" \
             > drift.sql
           echo "::group::Skema-drift ($DEPLOY_ENV)"
@@ -606,9 +695,23 @@ jobs:
       - name: Run DB migrations (before restart)
         if: inputs.deploy_strategy == 'migrate-first'
         run: |
+          # RUN_FLAGS: `docker compose run` BYGGER af sig selv, hvis imaget mangler
+          # lokalt. Falder pullet uden om (forkert tag, omdøbt service), ville
+          # boksen altså bygge imaget her — præcis den nedetid, S-349 fjerner, og
+          # på det trin, der er sværest at få øje på. `--no-build` gør det til en
+          # fejl i stedet.
+          # `if`-blok og IKKE `[[ … ]] && VAR=x`: GitHub kører run-blokke med
+          # `bash -e`, og en AND-liste, hvis første led er falsk, returnerer
+          # non-zero som samlet sætning — altså ville trinnet ABORTERE for
+          # enhver app i on-host-tilstand. Klassikeren, og den fejler først hos
+          # de andre apps, ikke her.
+          RUN_FLAGS=""
+          if [[ "${{ inputs.build_mode }}" == "registry" ]]; then
+            RUN_FLAGS="--no-build"
+          fi
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
             "cd ${{ inputs.app_dir }} && export APP_IMAGE='${APP_IMAGE}' && \
-             docker compose ${COMPOSE_FLAGS} run --rm ${{ inputs.compose_service }} \
+             docker compose ${COMPOSE_FLAGS} run --rm ${RUN_FLAGS} ${{ inputs.compose_service }} \
                npx prisma db push"
 
       # Umiddelbart efter db push og FØR genstart — samme grund som selve
@@ -768,17 +871,10 @@ jobs:
           echo "${#FILES[@]} SQL-script(s) kørt."
           REMOTE
 
-      # Ryd registry-nøglen fra boksen igen. Tokenet er kortlivet og udløber med
-      # kørslen, men `docker login` efterlader det i /root/.docker/config.json,
-      # og en udløbet nøgle i en fil er stadig en nøgle i en fil.
-      # `always()` — en fejlet udrulning skal rydde op efter sig som en vellykket.
-      # `|| true`: oprydningen må aldrig være dét, der farver kørslen rød.
-      - name: Log out of ghcr.io (server)
-        if: always() && inputs.build_mode == 'registry'
-        continue-on-error: true
-        run: |
-          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
-            "docker logout ghcr.io" || true
+      # (Registry-nøglen ryddes i "Pull image on server" — se `trap` dér. Der er
+      # med vilje IKKE et logout-trin her til sidst: nøglen skal ikke ligge på
+      # boksen gennem drift-gate, migrationer og genstart, når intet efter
+      # pullet har brug for registret.)
 
       - name: Reload Caddy
         if: inputs.reload_caddy == 'always' || (inputs.reload_caddy == 'non-dev' && inputs.environment != 'dev')
