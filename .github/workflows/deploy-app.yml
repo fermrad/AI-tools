@@ -610,7 +610,7 @@ jobs:
       #
       # Login, pull og oprydning ligger i ÉT trin med vilje. Nøglen skal ligge
       # på maskinen i så kort tid som muligt, og alt efter pullet (drift-gate,
-      # db push, `up -d --no-build`) bruger et image, der allerede er lokalt —
+      # db push, `up -d`) bruger et image, der allerede er lokalt —
       # registret er der ikke brug for igen. Lå oprydningen til sidst i jobbet,
       # var vinduet hele udrulningen i stedet for de sekunder, et pull tager.
       #
@@ -653,7 +653,18 @@ jobs:
              docker network create ferm-net 2>/dev/null || true
              cd '${APP_DIR}'
              export APP_IMAGE='${APP_IMAGE}'
-             docker compose ${COMPOSE_FLAGS} pull '${SERVICE}'"
+             docker compose ${COMPOSE_FLAGS} pull '${SERVICE}'
+             # Imaget SKAL ligge lokalt nu. Uden den her påstand ville et pull,
+             # der ikke gav det forventede tag, først vise sig i drift-gaten —
+             # hvor \`docker compose run\` BYGGER imaget af sig selv, hvis det
+             # mangler. Altså præcis den nedetid, S-349 fjerner, på det trin der
+             # er sværest at få øje på.
+             #
+             # Påstanden og ikke et \`--no-build\`-flag: \`docker compose run\`
+             # kender ikke det flag (målt 15-08-2026: 'unknown flag: --no-build'
+             # på staging-boksen) — kun \`up\` gør. En eksistenspåstand virker
+             # på enhver compose-version og fejler DESUDEN tidligere.
+             docker image inspect '${APP_IMAGE}' >/dev/null"
 
       # Porten (devhub #25). Diff'en beregnes med det NYE image (skemaet er bagt
       # ind) mod den KØRENDE database. Er ændringen tabsgivende, dør deployet her
@@ -667,23 +678,9 @@ jobs:
           # lokale image — altså regne driften på et andet skema end det, der
           # skal rulles ud. I on-host-tilstand er variablen tom, og `:-`
           # leverer det lokale navn som hidtil.
-          # RUN_FLAGS: `docker compose run` BYGGER af sig selv, hvis imaget mangler
-          # lokalt. Falder pullet uden om (forkert tag, omdøbt service), ville
-          # boksen altså bygge imaget her — præcis den nedetid, S-349 fjerner, og
-          # på det trin, der er sværest at få øje på. `--no-build` gør det til en
-          # fejl i stedet.
-          # `if`-blok og IKKE `[[ … ]] && VAR=x`: GitHub kører run-blokke med
-          # `bash -e`, og en AND-liste, hvis første led er falsk, returnerer
-          # non-zero som samlet sætning — altså ville trinnet ABORTERE for
-          # enhver app i on-host-tilstand. Klassikeren, og den fejler først hos
-          # de andre apps, ikke her.
-          RUN_FLAGS=""
-          if [[ "${{ inputs.build_mode }}" == "registry" ]]; then
-            RUN_FLAGS="--no-build"
-          fi
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
             "cd ${{ inputs.app_dir }} && export APP_IMAGE='${APP_IMAGE}' && \
-             docker compose ${COMPOSE_FLAGS} run --rm ${RUN_FLAGS} ${{ inputs.compose_service }} \
+             docker compose ${COMPOSE_FLAGS} run --rm ${{ inputs.compose_service }} \
                npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --script" \
             > drift.sql
           echo "::group::Skema-drift ($DEPLOY_ENV)"
@@ -695,23 +692,9 @@ jobs:
       - name: Run DB migrations (before restart)
         if: inputs.deploy_strategy == 'migrate-first'
         run: |
-          # RUN_FLAGS: `docker compose run` BYGGER af sig selv, hvis imaget mangler
-          # lokalt. Falder pullet uden om (forkert tag, omdøbt service), ville
-          # boksen altså bygge imaget her — præcis den nedetid, S-349 fjerner, og
-          # på det trin, der er sværest at få øje på. `--no-build` gør det til en
-          # fejl i stedet.
-          # `if`-blok og IKKE `[[ … ]] && VAR=x`: GitHub kører run-blokke med
-          # `bash -e`, og en AND-liste, hvis første led er falsk, returnerer
-          # non-zero som samlet sætning — altså ville trinnet ABORTERE for
-          # enhver app i on-host-tilstand. Klassikeren, og den fejler først hos
-          # de andre apps, ikke her.
-          RUN_FLAGS=""
-          if [[ "${{ inputs.build_mode }}" == "registry" ]]; then
-            RUN_FLAGS="--no-build"
-          fi
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
             "cd ${{ inputs.app_dir }} && export APP_IMAGE='${APP_IMAGE}' && \
-             docker compose ${COMPOSE_FLAGS} run --rm ${RUN_FLAGS} ${{ inputs.compose_service }} \
+             docker compose ${COMPOSE_FLAGS} run --rm ${{ inputs.compose_service }} \
                npx prisma db push"
 
       # Umiddelbart efter db push og FØR genstart — samme grund som selve
@@ -789,14 +772,9 @@ jobs:
         if: inputs.deploy_strategy != 'up-build'
         run: |
           UP_FLAGS=$([[ "$DEPLOY_ENV" == "production" ]] && echo "--force-recreate" || echo "")
-          # --no-build KUN i registry-tilstand. Imaget er hentet, så compose
-          # ville alligevel ikke bygge — men flaget gør det til en FEJL frem for
-          # et tavst on-host-byg, hvis servicen en dag mister sin `image:` eller
-          # APP_IMAGE ikke når frem. Netop dét byg er hele nedetiden, så det må
-          # ikke kunne snige sig ind igen ubemærket.
-          if [[ "${{ inputs.build_mode }}" == "registry" ]]; then
-            UP_FLAGS="$UP_FLAGS --no-build"
-          fi
+          # Bemærk: intet `--no-build` her. Værnet mod et tavst on-host-byg er
+          # eksistenspåstanden i "Pull image on server" — den virker på enhver
+          # compose-version og fejler tidligere. Se noten dér.
           ssh -i ~/.ssh/deploy_key \
             -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             "root@${HOST}" \
