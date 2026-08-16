@@ -67,6 +67,71 @@
 # som en del af sit `up`. Kombinationen afvises i et eget trin frem for at
 # bygge på serveren i tavshed.
 #
+# ── Diskvagt og oprydning (project S-362) ───────────────────────────────────
+#
+# `registry` købte nedetiden ned og betalte med DISK. Vejen henter et NYT image
+# pr. SHA, og intet fjernede det gamle: ti udrulninger på én dag gav 125 images
+# og 29,4 GB på projects staging-boks, som nåede 100 % og væltede udrulningen af
+# `f25a38e` 16-08-2026 — ikke i genstarten, men i `Run SQL scripts`, med
+# `could not extend file "base/16384/20851": No space left on device`.
+#
+# Trinnet `Diskvagt og oprydning` ligger derfor FØR alt, der rører boksen:
+# før backup, før rsync, før pullet, før migrationerne, før genstarten. Det er
+# ikke en detalje om placering, det er hele virkningen — det er PULLET, der
+# fylder disken, så en oprydning bagefter kommer altid et deploy for sent, og
+# et deploy, der dør på "no space", har ikke ryddet noget.
+#
+# Trinnet gør tre ting, og de er tre forskellige beslutninger:
+#
+#   1. IMAGES — `image_keep` UBRUGTE af appens EGET image-repo beholdes, og alt
+#      andet fjernes. Bemærk skellet: "de N nyeste" er ikke det samme som "den
+#      KØRENDE plus N". En ren alders- eller antalsregel ville rydde det image,
+#      containeren kører på, på en boks der ikke er udrullet i en uge. Trinnet
+#      spørger derfor MASKINEN — `docker ps -aq` → `docker inspect .Image` — og
+#      fredner hvert image-ID, en container (kørende ELLER stoppet) hænger på,
+#      før den overhovedet begynder at tælle. En stoppet container er en
+#      rollback-sti, der er valgt bevidst (jf. `docker start` som vejen tilbage
+#      ved en pensionering), og den skal beholde sit image.
+#
+#      Snittet er appens eget repo og ikke `docker image prune -a`. Boksene er
+#      DELTE — dev kører project + crm + area51, staging bærer også ferm-os og
+#      devhub — så en global prune ville lade den enes udrulning fjerne den
+#      andens rollback-images. Fjernelsen sker med `docker image rm <ref>` og
+#      ikke med `prune`, så loggen kan opregne præcis, hvad der forsvandt.
+#
+#      Er `build_mode: on-host` (default), er der intet SHA-tagget repo at
+#      rydde i, og punktet gør ingenting.
+#
+#   2. HÆNGENDE IMAGES — `docker image prune -f` UDEN `-a`. Kun utaggede
+#      images uden en container. Det er dødvægten fra et on-host-byg, hvor
+#      tagget flyttede til den nye udgave, og det er derfor det ene punkt, der
+#      også gavner en app, som ikke har valgt registry til. `prune` rører pr.
+#      definition ikke et image, en container hænger på.
+#
+#   3. BYGGECACHE — `docker builder prune -af`, men KUN ved
+#      `build_mode: registry`. På en registry-boks bygges der aldrig, så cachen
+#      er død vægt fra fødslen (prod bar 10,25 GB af den slags). På en boks, der
+#      stadig bygger on-host, er den derimod dét, der holder byggetiden nede, og
+#      et `-af` efter hvert deploy ville tvinge et fuldt genbyg hver gang. Målt
+#      16-08-2026 bærer de to interne bokse 23,15 GB og 18,95 GB byggecache —
+#      netop dér ville en ubetinget rydning gøre mest skade.
+#
+# Diskvarslet ligger i det SAMME trin, og rækkefølgen inde i det er valgt:
+# der måles FØR oprydningen, ryddes, og måles IGEN — og varslet udtaler sig om
+# det, der er tilbage BAGEFTER. Målte man kun før, ville varslet råbe på en
+# boks, oprydningen lige har reddet; ryddede man først og målte kun bagefter,
+# ville man ikke kunne se, om oprydningen overhovedet gjorde noget. Begge tal
+# står i loggen.
+#
+# Tærsklerne er `disk_warn_percent` (advarsel) og `disk_fail_percent` (stop),
+# begge STRENGT større end. Målt 16-08-2026 stod alle fire bokse under
+# advarselstærsklen — prod 73 %, staging 76 %, intern prod 79 %, intern staging
+# 80 % — så defaults er sikre for en app, der ikke har valgt noget til.
+# `disk_fail_percent: 100` slår stoppet fra uden at slå målingen fra.
+#
+# Vagten FEJLER LUKKET: kan målingen ikke læses ud af svaret, stopper deployet
+# frem for at fortsætte i tro på en tom disk-oplysning.
+#
 # SQL, som Prisma ikke ejer: `scripts/sql/*.sql`
 #
 # `prisma db push` kender ikke CHECK-constraints og triggere, og
@@ -222,6 +287,27 @@ on:
         required: false
         type: string
         default: ''
+      image_keep:
+        # UBRUGTE images, ikke images i alt: alt hvad en container (kørende
+        # eller stoppet) hænger på, fredes FØR der tælles. 3 er valgt, fordi en
+        # tilbagerulning skal kunne ske uden at hente over nettet, og fordi
+        # projects image er ~1,7 GB — tre ubrugte er ~5 GB, hvor ti var ~17 GB.
+        description: 'Ubrugte images af appens eget repo, der beholdes som rollback-sti (kun build_mode: registry)'
+        required: false
+        type: number
+        default: 3
+      disk_warn_percent:
+        description: 'Advar, når disken efter oprydningen er over denne procent'
+        required: false
+        type: number
+        default: 85
+      disk_fail_percent:
+        # 100 slår stoppet fra uden at slå målingen fra: sammenligningen er
+        # strengt større end, og en disk kan ikke komme over 100 %.
+        description: 'Stop deployet, når disken efter oprydningen er over denne procent (100 = aldrig)'
+        required: false
+        type: number
+        default: 95
       schema_drift_gate:
         description: 'Stop deployet hvis skemaændringen er tabsgivende (kræver scripts/schema-drift.mjs i app-repoet; kun migrate-first)'
         required: false
@@ -305,6 +391,12 @@ jobs:
             NAME="ghcr.io/${GITHUB_REPOSITORY,,}"
           fi
           echo "APP_IMAGE=${NAME}:${GIT_SHA}" >> "$GITHUB_ENV"
+          # Repo-navnet UDEN tag. Oprydningen (S-362) skal kunne opregne appens
+          # ØVRIGE tags på boksen, og den må ikke udlede navnet ved at klippe i
+          # APP_IMAGE: et registry-navn kan bære en port (`host:5000/app`), så
+          # "alt før sidste kolon" er en regel, der virker lige indtil den ikke
+          # gør. Navnet skrives dér, hvor det allerede er kendt.
+          echo "APP_IMAGE_REPO=${NAME}" >> "$GITHUB_ENV"
           echo "Image: ${NAME}:${GIT_SHA}"
 
       # Compose-flag pr. miljø én gang for alle trin.
@@ -438,6 +530,165 @@ jobs:
             echo "Attempt $i/18 — waiting for route…"
             sleep 5
           done
+
+      # ── Diskvagt og oprydning (S-362) ──────────────────────────────────────
+      # FØRSTE trin efter ssh, og det er hele virkningen: alt herefter — backup,
+      # rsync, pull, migrationer, genstart — SKRIVER på boksen. Se afsnittet
+      # "Diskvagt og oprydning" øverst i filen for de tre oprydningers hver sin
+      # betingelse, og for hvorfor der måles BÅDE før og efter.
+      #
+      # Oprydningen er tålsom (`|| true`): en prune, der fejler, må ikke vælte en
+      # udrulning, og gør den det, fanger vagten nedenfor den fulde disk
+      # alligevel. MÅLINGEN er til gengæld streng — kan den ikke læses, stopper
+      # deployet.
+      - name: Diskvagt og oprydning
+        env:
+          APP_DIR: ${{ inputs.app_dir }}
+          IMAGE_REPO: ${{ env.APP_IMAGE_REPO }}
+          IMAGE_KEEP: ${{ inputs.image_keep }}
+          # Ét flag frem for `inputs.build_mode` i den fjerne streng: værdien
+          # skal afgøres HER, hvor `build_mode`s betydning er kendt, ikke tolkes
+          # af en anden maskines shell.
+          REGISTRY_MODE: ${{ inputs.build_mode == 'registry' && '1' || '0' }}
+          WARN_PCT: ${{ inputs.disk_warn_percent }}
+          FAIL_PCT: ${{ inputs.disk_fail_percent }}
+        run: |
+          # pipefail er ikke valgfri: uden den ville `ssh … | tee` returnere
+          # TEE's status, og en boks, der ikke svarer, ville se ud som en
+          # vellykket måling — altså præcis det falsk-grønne, vagten findes for.
+          set -euo pipefail
+          # RUNNER_TEMP og ikke arbejdsmappen: `rsync app to server` synkroniserer
+          # `sync_path` med --delete, så en rapportfil i træet ville blive lagt ud
+          # på HVER apps boks og blive liggende. Målt på staging 16-08-2026.
+          RAPPORT="${RUNNER_TEMP:-/tmp}/disk-rapport.txt"
+          ssh -i ~/.ssh/deploy_key \
+            -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            "root@${HOST}" \
+            bash -s -- "$APP_DIR" "$IMAGE_REPO" "$IMAGE_KEEP" "$REGISTRY_MODE" \
+            << 'REMOTE' | tee "$RAPPORT"
+          set -euo pipefail
+          APP_DIR="$1"; IMAGE_REPO="$2"; IMAGE_KEEP="$3"; REGISTRY_MODE="$4"
+
+          # Docker-roden er dét, et pull fylder op; app-mappen er dét, rsync og
+          # backup fylder op. På dev-boksen er app-mappen et symlink til et
+          # ANDET volume, så de to kan være hver sit filsystem — og ved et
+          # førstedeploy findes mappen slet ikke endnu.
+          DOCKER_ROOT="$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)"
+          [ -n "$DOCKER_ROOT" ] && [ -d "$DOCKER_ROOT" ] || DOCKER_ROOT=/
+          [ -d "$APP_DIR" ] || APP_DIR=/
+
+          # Det HØJESTE forbrug blandt dem — ikke gennemsnittet og ikke roden
+          # alene. Ligger de to på samme filsystem, er svaret bare det samme.
+          maal_pct() {
+            hoejest=0
+            for sti in "$DOCKER_ROOT" "$APP_DIR"; do
+              p="$(df -P "$sti" | awk 'NR==2 {gsub(/%/,"",$5); print $5}')"
+              if [ -n "$p" ] && [ "$p" -gt "$hoejest" ]; then hoejest="$p"; fi
+            done
+            echo "$hoejest"
+          }
+
+          # `sort -u` på selve linjen: er begge stier på samme filsystem, skal
+          # rapporten ikke sige det samme to gange.
+          vis_df() {
+            { for sti in "$DOCKER_ROOT" "$APP_DIR"; do
+                df -hP "$sti" | awk 'NR==2 {printf "  %-14s %5s brugt   %6s fri   (%s)\n", $6, $5, $4, $1}'
+              done; } | sort -u
+          }
+
+          FOER="$(maal_pct)"
+          echo "── Disk FØR oprydning"
+          vis_df
+
+          # 1) Appens EGNE images. Fredningen kommer fra MASKINEN, ikke fra
+          #    alder: hvert image-ID, en container hænger på — kørende ELLER
+          #    stoppet — beholdes, FØR der overhovedet tælles. En stoppet
+          #    container er en bevidst valgt rollback-sti.
+          FJERNET=0
+          if [ "$REGISTRY_MODE" = "1" ] && [ -n "$IMAGE_REPO" ]; then
+            BRUGTE="$(docker ps -aq | xargs -r docker inspect -f '{{.Image}}' 2>/dev/null | sort -u || true)"
+            echo "── Images i '$IMAGE_REPO' (beholder alt i brug + $IMAGE_KEEP ubrugte)"
+            BEHOLDT=0
+            # --no-trunc i BEGGE ender: `docker inspect .Image` svarer med det
+            # fulde sha256, mens `docker images` som standard forkorter til 12
+            # tegn. Uden det ville fredningen aldrig matche, og trinnet ville
+            # fjerne det image, containeren kører på.
+            #
+            # docker images svarer nyeste først; rækkefølgen ER "hvilke tre
+            # ubrugte beholdes".
+            while read -r ID REF; do
+              [ -n "${ID:-}" ] || continue
+              if printf '%s\n' "$BRUGTE" | grep -qxF "$ID"; then
+                echo "  i brug    $REF"
+                continue
+              fi
+              if [ "$BEHOLDT" -lt "$IMAGE_KEEP" ]; then
+                BEHOLDT=$((BEHOLDT + 1))
+                echo "  rollback  $REF"
+                continue
+              fi
+              echo "  fjerner   $REF"
+              if docker image rm "$REF" >/dev/null 2>&1; then
+                FJERNET=$((FJERNET + 1))
+              else
+                echo "    (kunne ikke fjernes — springes over)"
+              fi
+            done < <(docker images --no-trunc --filter "reference=${IMAGE_REPO}" --format '{{.ID}} {{.Repository}}:{{.Tag}}')
+            echo "  fjernet: $FJERNET"
+          else
+            echo "── Images: intet SHA-tagget repo at rydde i (build_mode: on-host)"
+          fi
+
+          # 2) Hængende images: UDEN -a, altså kun utaggede uden en container.
+          #    Det er dødvægten fra et on-host-byg, hvor tagget flyttede med
+          #    over på den nye udgave — og derfor det ene punkt, der også
+          #    gavner en app, som ikke har valgt registry til.
+          echo "── Hængende images"
+          docker image prune -f 2>&1 | tail -n 1 || true
+
+          # 3) Byggecache. KUN i registry-tilstand: dér bygger boksen aldrig, så
+          #    cachen er død vægt fra fødslen. En on-host-boks lever af den.
+          if [ "$REGISTRY_MODE" = "1" ]; then
+            echo "── Byggecache (boksen bygger ikke i registry-tilstand)"
+            docker builder prune -af 2>&1 | tail -n 1 || true
+          else
+            echo "── Byggecache: urørt — build_mode er on-host, og cachen er i brug her"
+          fi
+
+          EFTER="$(maal_pct)"
+          echo "── Disk EFTER oprydning"
+          vis_df
+          echo "Diskforbrug: ${FOER}% → ${EFTER}%"
+
+          # Maskinlæsbare linjer til sidst. Tærsklerne afgøres på RUNNEREN, hvor
+          # de står i workflowets egen tekst, frem for inde i en fjern shell.
+          echo "##DISK_PCT_FOER=${FOER}"
+          echo "##DISK_PCT=${EFTER}"
+          REMOTE
+
+          PCT="$(sed -n 's/^##DISK_PCT=//p' "$RAPPORT" | tail -n 1)"
+          FOER_PCT="$(sed -n 's/^##DISK_PCT_FOER=//p' "$RAPPORT" | tail -n 1)"
+
+          # FEJLER LUKKET. Et manglende tal er ikke "alt er nok fint" — det er
+          # "vi ved det ikke", og at rulle videre på dét er netop den antagelse,
+          # der kostede en udrulning midt om natten.
+          if ! [[ "$PCT" =~ ^[0-9]+$ ]]; then
+            echo "::error title=Diskvagten kunne ikke måle ${DEPLOY_ENV}-boksen::Trinnet fik intet brugbart diskforbrug retur. Vagten fejler LUKKET frem for at rulle ud i blinde — se trinnets log ovenfor for, hvad boksen faktisk svarede."
+            exit 1
+          fi
+
+          echo "Diskforbrug på ${DEPLOY_ENV} efter oprydning: ${PCT}% (før: ${FOER_PCT}%)"
+
+          # Strengt større end, så disk_fail_percent: 100 slår stoppet fra uden
+          # at slå målingen fra.
+          if [ "$PCT" -gt "$FAIL_PCT" ]; then
+            echo "::error title=For lidt plads på ${DEPLOY_ENV}-boksen (${PCT}%)::Disken er over ${FAIL_PCT}% EFTER oprydningen, så pullet ville sandsynligvis dø midt i udrulningen — det var dét, der væltede projects staging 16-08-2026 (S-362). INTET er rørt endnu: hverken backup, kode, skema eller containere. Se 'docker system df' på boksen for hvad der fylder."
+            exit 1
+          fi
+
+          if [ "$PCT" -gt "$WARN_PCT" ]; then
+            echo "::warning title=Disken på ${DEPLOY_ENV}-boksen fylder (${PCT}%)::Over ${WARN_PCT}% efter oprydningen. Udrulningen fortsætter, men der er ikke mange tilbage — se 'docker system df' på boksen."
+          fi
 
       - name: Ensure app directory exists on persistent volume
         if: env.DEPLOY_ENV == 'dev' && inputs.ensure_dev_dir
