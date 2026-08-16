@@ -557,11 +557,15 @@ jobs:
           # TEE's status, og en boks, der ikke svarer, ville se ud som en
           # vellykket måling — altså præcis det falsk-grønne, vagten findes for.
           set -euo pipefail
+          # RUNNER_TEMP og ikke arbejdsmappen: `rsync app to server` synkroniserer
+          # `sync_path` med --delete, så en rapportfil i træet ville blive lagt ud
+          # på HVER apps boks og blive liggende. Målt på staging 16-08-2026.
+          RAPPORT="${RUNNER_TEMP:-/tmp}/disk-rapport.txt"
           ssh -i ~/.ssh/deploy_key \
             -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             "root@${HOST}" \
             bash -s -- "$APP_DIR" "$IMAGE_REPO" "$IMAGE_KEEP" "$REGISTRY_MODE" \
-            << 'REMOTE' | tee disk-rapport.txt
+            << 'REMOTE' | tee "$RAPPORT"
           set -euo pipefail
           APP_DIR="$1"; IMAGE_REPO="$2"; IMAGE_KEEP="$3"; REGISTRY_MODE="$4"
 
@@ -662,8 +666,8 @@ jobs:
           echo "##DISK_PCT=${EFTER}"
           REMOTE
 
-          PCT="$(sed -n 's/^##DISK_PCT=//p' disk-rapport.txt | tail -n 1)"
-          FOER_PCT="$(sed -n 's/^##DISK_PCT_FOER=//p' disk-rapport.txt | tail -n 1)"
+          PCT="$(sed -n 's/^##DISK_PCT=//p' "$RAPPORT" | tail -n 1)"
+          FOER_PCT="$(sed -n 's/^##DISK_PCT_FOER=//p' "$RAPPORT" | tail -n 1)"
 
           # FEJLER LUKKET. Et manglende tal er ikke "alt er nok fint" — det er
           # "vi ved det ikke", og at rulle videre på dét er netop den antagelse,
