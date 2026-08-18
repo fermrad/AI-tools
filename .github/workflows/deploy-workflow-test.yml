@@ -19,6 +19,7 @@ on:
       - '.github/workflows/backup-db.yml'
       - '.github/workflows/deploy-workflow-test.yml'
       - 'scripts/test-deploy-backup.sh'
+      - 'scripts/test-deploy-remote-quoting.sh'
 
 jobs:
   backup-step:
@@ -34,3 +35,11 @@ jobs:
 
       - name: Test backup-trinnet
         run: bash scripts/test-deploy-backup.sh
+
+      # S-354 punkt 2: et branchnavn må ikke kunne køre kode som root på
+      # målserveren. Testen kører trinnene mod en falsk ssh og måler BÅDE at
+      # prøven ikke eksekverer, OG at de variabler, der skal ekspandere,
+      # stadig gør — en citering, der lukker hullet og brækker udrulningen,
+      # er ikke en rettelse.
+      - name: Test citeringen ind i den fjerne shell
+        run: bash scripts/test-deploy-remote-quoting.sh
