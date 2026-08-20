@@ -127,13 +127,49 @@
 #      også gavner en app, som ikke har valgt registry til. `prune` rører pr.
 #      definition ikke et image, en container hænger på.
 #
-#   3. BYGGECACHE — `docker builder prune -af`, men KUN ved
-#      `build_mode: registry`. På en registry-boks bygges der aldrig, så cachen
-#      er død vægt fra fødslen (prod bar 10,25 GB af den slags). På en boks, der
-#      stadig bygger on-host, er den derimod dét, der holder byggetiden nede, og
-#      et `-af` efter hvert deploy ville tvinge et fuldt genbyg hver gang. Målt
-#      16-08-2026 bærer de to interne bokse 23,15 GB og 18,95 GB byggecache —
-#      netop dér ville en ubetinget rydning gøre mest skade.
+#   3. BYGGECACHE — to bokse, to regler, fordi cachen betyder to forskellige
+#      ting de to steder.
+#
+#      `build_mode: registry` → `docker builder prune -af`. En registry-boks
+#      bygger ALDRIG, så cachen er død vægt fra fødslen (prod bar 10,25 GB af
+#      den slags). Uændret siden S-362 — "Registry-udrulningen har ingen
+#      oprydning — staging-boksen løb tør for disk efter ti deploys".
+#
+#      `build_mode: on-host` → `docker builder prune -f --filter
+#      until=<builder_keep_hours>h`, og **kun hvis appen har sat inputtet**.
+#      Default er `0`, altså SLUKKET: fire apps kalder denne fil, og en ny
+#      oprydning må ikke ændre adfærd for nogen, der ikke har bedt om den.
+#      Et ubetinget `-af` ville gøre mest skade netop her — dev-boksen er
+#      2 vCPU / 3,8 GB uden swap og kører dev for project + crm + area51
+#      samtidig, og S-291 — "Dev-boksen har 3,8 GB uden swap og OOM'er, når to
+#      apps bygger samtidig" — målte OOM-dræberen slå til otte gange på under
+#      to timer, hvorefter tailscaled mistede sin rute. Et fuldt genbyg ved
+#      hvert deploy er præcis den belastning.
+#
+#      ⭐ Hvorfor ALDER og ikke et loft (`--max-used-space`), som S-365 — "De
+#      interne bokse bærer 42 GB byggecache — S-362's oprydning rører dem med
+#      vilje ikke" — også overvejede. Tre målinger, alle 20-08-2026:
+#
+#        * `until=` måler på hvornår posten SIDST BLEV BRUGT, ikke på hvornår
+#          den blev skabt. Efterprøvet mod en rigtig dæmon i
+#          `scripts/test-deploy-diskvagt-byggecache.sh`: en post, der blev
+#          SKABT før snittet, men GENBRUGT af et byg efter det, overlever.
+#          En cachepost, byggene stadig rammer, nulstiller altså sit eget ur og
+#          ældes aldrig ud. Det er dét, der gør reglen hård uden at ramme det
+#          varme.
+#        * Et loft rammer efter STØRRELSE og er blindt for, om offeret er
+#          varmt. På intern staging var 7,55 GB af cachen sidst brugt for få
+#          minutter siden; et loft på 5 GB ville have kastet ~2,5 GB af netop
+#          dét væk — de lag, næste byg skulle genbruge. Aldersreglen beholder
+#          dem alle og henter stadig 10,51 GB.
+#        * Og `--keep-storage`, som punktet foreslog, FINDES IKKE længere på
+#          boksene: Docker 29.6/29.5 kender kun `--reserved-space` /
+#          `--max-used-space`. Med oprydningens `|| true` ville flaget være
+#          blevet en tavs no-op.
+#
+#      Målt 20-08-2026 bærer de to interne bokse 23,15 GB (169 poster, hver
+#      eneste sidst brugt for 3-4 uger siden) og 18,07 GB (155 poster, hvoraf
+#      10,51 GB er ubrugt i over en uge).
 #
 # Diskvarslet ligger i det SAMME trin, og rækkefølgen inde i det er valgt:
 # der måles FØR oprydningen, ryddes, og måles IGEN — og varslet udtaler sig om
@@ -359,6 +395,22 @@ on:
         required: false
         type: number
         default: 3
+      builder_keep_hours:
+        # SLUKKET som default, og det er en bevidst beslutning frem for et
+        # forsigtigt tal: fire apps kalder denne fil, og byggecachen er dét,
+        # en on-host-boks bygger hurtigt af. Reglen gælder først, når en app
+        # selv har sagt ja. 168 (en uge) er det tal, målingerne i afsnittet
+        # "Diskvagt og oprydning" øverst i filen er regnet på.
+        #
+        # Snittet er SIDST BRUGT, ikke skabt — en cachepost, byggene stadig
+        # genbruger, nulstiller sit eget ur og ældes aldrig ud.
+        #
+        # Ignoreres ved `build_mode: registry`: dér bygges der aldrig, og
+        # cachen ryddes helt (`-af`) som hidtil.
+        description: 'Ryd byggecache, der ikke har været brugt i så mange timer (0 = slået fra; kun build_mode: on-host)'
+        required: false
+        type: number
+        default: 0
       disk_warn_percent:
         description: 'Advar, når disken efter oprydningen er over denne procent'
         required: false
@@ -700,6 +752,7 @@ jobs:
           # skal afgøres HER, hvor `build_mode`s betydning er kendt, ikke tolkes
           # af en anden maskines shell.
           REGISTRY_MODE: ${{ inputs.build_mode == 'registry' && '1' || '0' }}
+          BUILDER_KEEP_HOURS: ${{ inputs.builder_keep_hours }}
           WARN_PCT: ${{ inputs.disk_warn_percent }}
           FAIL_PCT: ${{ inputs.disk_fail_percent }}
         run: |
@@ -740,13 +793,39 @@ jobs:
           Q_IMAGE_REPO=$(printf '%q' "$IMAGE_REPO")
           Q_IMAGE_KEEP=$(printf '%q' "$IMAGE_KEEP")
           Q_REGISTRY_MODE=$(printf '%q' "$REGISTRY_MODE")
+          # Citeret af samme grund som de fire ovenfor, og ikke fordi den
+          # ligner dem: `builder_keep_hours` er valgfri, og en kalder, der
+          # sender den tom, ville uden `%q` lade argumentet forsvinde i ssh's
+          # fladning — altså præcis fejlen fra #65 igen, bare et argument
+          # længere nede.
+          Q_BUILDER_KEEP=$(printf '%q' "$BUILDER_KEEP_HOURS")
           ssh -i ~/.ssh/deploy_key \
             -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             "root@${HOST}" \
-            bash -s -- "$Q_APP_DIR" "$Q_IMAGE_REPO" "$Q_IMAGE_KEEP" "$Q_REGISTRY_MODE" \
+            bash -s -- "$Q_APP_DIR" "$Q_IMAGE_REPO" "$Q_IMAGE_KEEP" "$Q_REGISTRY_MODE" "$Q_BUILDER_KEEP" \
             << 'REMOTE' | tee "$RAPPORT"
           set -euo pipefail
           APP_DIR="$1"; IMAGE_REPO="$2"; IMAGE_KEEP="$3"; REGISTRY_MODE="$4"
+          BUILDER_KEEP_HOURS="$5"
+
+          # Inddata afgøres FØRST, før noget som helst røres. En tastefejl i en
+          # apps workflow skal fælde trinnet dér, hvor intet er fjernet endnu —
+          # ikke vise sig som en tavs no-op nede i oprydningen, hvor `|| true`
+          # ville sluge docker's klage over et flag, den ikke forstod.
+          [ -n "$BUILDER_KEEP_HOURS" ] || BUILDER_KEEP_HOURS=0
+          if ! printf '%s' "$BUILDER_KEEP_HOURS" | grep -Eq '^[0-9]+([.][0-9]+)?$'; then
+            echo "builder_keep_hours skal være et tal i timer (0 slår reglen fra) — trinnet fik: '$BUILDER_KEEP_HOURS'" >&2
+            exit 1
+          fi
+          # Tallet må gerne være en brøkdel af en time: prøven i
+          # scripts/test-deploy-diskvagt-byggecache.sh kører reglen på
+          # sekundskala, og det er dén, der gør den efterprøvbar mod en rigtig
+          # dæmon uden at vente en uge.
+          if awk -v t="$BUILDER_KEEP_HOURS" 'BEGIN { exit !(t > 0) }'; then
+            BUILDER_KEEP_TIL=1
+          else
+            BUILDER_KEEP_TIL=0
+          fi
 
           # Docker-roden er dét, et pull fylder op; app-mappen er dét, rsync og
           # backup fylder op. På dev-boksen er app-mappen et symlink til et
@@ -825,13 +904,23 @@ jobs:
           echo "── Hængende images"
           docker image prune -f 2>&1 | tail -n 1 || true
 
-          # 3) Byggecache. KUN i registry-tilstand: dér bygger boksen aldrig, så
-          #    cachen er død vægt fra fødslen. En on-host-boks lever af den.
+          # 3) Byggecache. To tilstande, to regler, fordi cachen betyder to
+          #    forskellige ting de to steder — se afsnittet øverst i filen.
+          #
+          #    registry: boksen bygger ALDRIG, så alt kan gå (uændret).
+          #
+          #    on-host: cachen er dét, næste byg genbruger. `until=` snitter på
+          #    SIDST BRUGT, så en post, byggene stadig rammer, nulstiller sit
+          #    eget ur og ældes aldrig ud — derfor kan reglen være hård uden at
+          #    ramme det varme. Den gælder først, når appen har sat inputtet.
           if [ "$REGISTRY_MODE" = "1" ]; then
             echo "── Byggecache (boksen bygger ikke i registry-tilstand)"
             docker builder prune -af 2>&1 | tail -n 1 || true
+          elif [ "$BUILDER_KEEP_TIL" = "1" ]; then
+            echo "── Byggecache ubrugt i over ${BUILDER_KEEP_HOURS} timer (alt nyere beholdes)"
+            docker builder prune -f --filter "until=${BUILDER_KEEP_HOURS}h" 2>&1 | tail -n 1 || true
           else
-            echo "── Byggecache: urørt — build_mode er on-host, og cachen er i brug her"
+            echo "── Byggecache: urørt — build_mode er on-host, og cachen er dét, næste byg genbruger (builder_keep_hours: 0)"
           fi
 
           EFTER="$(maal_pct)"
