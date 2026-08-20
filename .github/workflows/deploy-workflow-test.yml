@@ -20,6 +20,7 @@ on:
       - '.github/workflows/deploy-workflow-test.yml'
       - 'scripts/test-deploy-backup.sh'
       - 'scripts/test-deploy-remote-quoting.sh'
+      - 'scripts/test-deploy-diskvagt-byggecache.sh'
 
 jobs:
   backup-step:
@@ -43,3 +44,24 @@ jobs:
       # er ikke en rettelse.
       - name: Test citeringen ind i den fjerne shell
         run: bash scripts/test-deploy-remote-quoting.sh
+
+  diskvagt-byggecache:
+    name: Byggecache-oprydningen i diskvagten
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      # Eget job og ikke et trin mere ovenfor: denne test kan ikke stubbes.
+      # Hele reglen fra S-365 — "De interne bokse bærer 42 GB byggecache —
+      # S-362's oprydning rører dem med vilje ikke" — hviler på, at buildkits
+      # `--filter until=` snitter på hvornår en cachepost SIDST BLEV BRUGT og
+      # ikke på hvornår den blev SKABT. Det kan kun en rigtig dæmon svare på,
+      # og runneren har én.
+      #
+      # ENGANGSDAEMON: testen kalder GLOBALE prunes og nægter derfor at køre
+      # på en maskine med byggecache, den ikke selv har lavet. Runneren er
+      # brug-og-smid-væk, så her er svaret ja.
+      - name: Test byggecache-oprydningen mod en rigtig docker-dæmon
+        env:
+          DISKVAGT_TEST_ENGANGSDAEMON: '1'
+        run: bash scripts/test-deploy-diskvagt-byggecache.sh
