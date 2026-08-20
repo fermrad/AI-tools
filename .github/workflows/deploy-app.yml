@@ -711,10 +711,39 @@ jobs:
           # `sync_path` med --delete, så en rapportfil i træet ville blive lagt ud
           # på HVER apps boks og blive liggende. Målt på staging 16-08-2026.
           RAPPORT="${RUNNER_TEMP:-/tmp}/disk-rapport.txt"
+          # ⚠️ CITERET, og det er IKKE kosmetik — se "Citering ind i en fjern
+          # shell" øverst i filen.
+          #
+          # `IMAGE_REPO` kommer fra `needs.build.outputs.image_repo`, og
+          # `build`-jobbet SPRINGES OVER i on-host-tilstand. Værdien er derfor
+          # TOM pr. konstruktion for hver on-host-app.
+          #
+          # ssh samler sine argumenter til ÉN streng, som den fjerne shell
+          # parser forfra. Et tomt argument forsvinder i den fladning: resten
+          # rykker en plads ned, `$4` bliver aldrig sat, og `set -u` dræber
+          # scriptet på linje 2 med `$4: unbound variable`.
+          #
+          # Målt 20-08-2026 på en rigtig staging-udrulning af area51 (S-357).
+          # Fejlen har været latent siden S-362 og rammer HVER on-host-app —
+          # crm og devhub brækker i det sekund, deres pin flytter forbi den.
+          # project er upåvirket, fordi den er `registry`, og det er derfor
+          # ingen har set det.
+          #
+          # `-n "$IMAGE_REPO"`-vagten længere nede er RIGTIG og var der i
+          # forvejen — den var bare uopnåelig, fordi tildelingen dør to linjer
+          # tidligere. Rettelsen gør vagten nåelig; den erstatter den ikke.
+          #
+          # `${4:-}` ville have været ét tegn — og ville have gjort en højlydt
+          # fejl tavs: ethvert argument kunne rykke sig, og en forkert værdi
+          # ville lande i en rigtigt navngivet variabel.
+          Q_APP_DIR=$(printf '%q' "$APP_DIR")
+          Q_IMAGE_REPO=$(printf '%q' "$IMAGE_REPO")
+          Q_IMAGE_KEEP=$(printf '%q' "$IMAGE_KEEP")
+          Q_REGISTRY_MODE=$(printf '%q' "$REGISTRY_MODE")
           ssh -i ~/.ssh/deploy_key \
             -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
             "root@${HOST}" \
-            bash -s -- "$APP_DIR" "$IMAGE_REPO" "$IMAGE_KEEP" "$REGISTRY_MODE" \
+            bash -s -- "$Q_APP_DIR" "$Q_IMAGE_REPO" "$Q_IMAGE_KEEP" "$Q_REGISTRY_MODE" \
             << 'REMOTE' | tee "$RAPPORT"
           set -euo pipefail
           APP_DIR="$1"; IMAGE_REPO="$2"; IMAGE_KEEP="$3"; REGISTRY_MODE="$4"
