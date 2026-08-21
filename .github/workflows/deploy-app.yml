@@ -458,6 +458,69 @@ on:
         default: true
 
 jobs:
+  # ── Ref-vagten (project S-452) ────────────────────────────────────────────
+  #
+  # Fælder en FORKORTET commit-SHA i `checkout_ref`, før `actions/checkout`
+  # når at gætte forkert på den.
+  #
+  # Målt 20-08-2026 på en prod-dispatch af project med `ref=1c80196`:
+  # checkout slog den korte SHA op som et GRENNAVN — `+refs/heads/1c80196` —
+  # og gav tre forsøg over 35 sekunder, der alle endte i
+  # `The process '/usr/bin/git' failed with exit code 1`. Intet i den fejl
+  # nævner refs, grene eller SHA-længde; man skal ind i loggen OVER fejlen og
+  # læse `refs/heads/` for at se, hvad der gik galt. Genkørslen med den fulde
+  # 40-tegns SHA gik igennem.
+  #
+  # Vagten er en FÆLDE og ikke en hjælpsomhed. Trinnet kunne folde den korte
+  # SHA ud til den fulde (`gh api repos/OWNER/REPO/commits/REF -q .sha`), men
+  # den, der pinner et prod-deploy, skal se præcis den SHA, der rulles ud —
+  # ikke få en anden end den, hun skrev.
+  #
+  # ── Hvorfor vagten bor HER og ikke i hver apps deploy.yml ─────────────────
+  #
+  # Punktet foreslog trinnet i `deploy.yml`. Det kan ikke lade sig gøre som et
+  # trin: `jobs.deploy` i alle fire apper er et job, der KALDER en
+  # genbrugsworkflow, og GitHub tillader kun name/uses/with/secrets/strategy/
+  # needs/if/concurrency/permissions på sådan et job — der er ingen `steps:`
+  # at hænge vagten på. Den ville altså kræve et NYT job i hvert af de fire
+  # repos, altså fire kopier af den samme regex og den samme besked. Her står
+  # den ét sted og dækker project, crm, devhub og area51 på én gang.
+  #
+  # Prisen er, at hver app skal bumpe sit pin til denne fil, før vagten når
+  # frem. Det er den samme pris som enhver anden rettelse her, og den er
+  # bevidst (se pin-kommentaren i app-repoernes deploy.yml).
+  #
+  # ── Eget job og ikke et trin i `build`/`deploy` ───────────────────────────
+  #
+  # BEGGE de to jobs nedenfor checker ud med `checkout_ref`, så et trin skulle
+  # skrives to gange i denne fil for at dække begge veje. Et eget job siger
+  # det én gang — og fælder som en NAVNGIVEN rød boble, hvilket er hele
+  # pointen i et punkt om en ulæselig fejl.
+  #
+  # Job-id'et er `ref_gate` med UNDERSTREG. `needs.ref-gate.result` ville
+  # blive læst som et minus af Actions' udtrykslag.
+  ref_gate:
+    name: Kontrollér ref
+    runs-on: ubuntu-latest
+    steps:
+      # Værdien læses som `"$REF"` fra `env:` og interpoleres IKKE ind i
+      # kommandoen. `${{ }}` substitueres af Actions, før shellen ser
+      # `run:`-blokken — det er dét, S-411/S-418 kostede huset 20 tomme
+      # kørsler at lære, og actionlint-porten på project vogter netop det.
+      - name: En forkortet SHA er ikke en commit for actions/checkout
+        env:
+          REF: ${{ inputs.checkout_ref }}
+        run: |
+          set -euo pipefail
+          # 7-39 hexcifre og intet andet. 40 er den gyldige form og slipper
+          # forbi; alt med en skråstreg (`refs/heads/...`) gør det også, og
+          # dét er med vilje — se den falske positiv nedenfor.
+          if printf '%s' "$REF" | grep -qE '^[0-9a-fA-F]{7,39}$'; then
+            echo "::error title=Forkortet SHA i ref::'$REF' ligner en forkortet commit-SHA, og actions/checkout kan ikke checke sådan en ud. Alt kortere end 40 tegn slås op som et GRENNAVN (refs/heads/$REF) og fejler efter tre forsøg med 'The process /usr/bin/git failed with exit code 1' — en fejl, der ikke nævner refs med et ord. Brug den FULDE 40-tegns SHA: git rev-parse $REF, eller gh api repos/OWNER/REPO/commits/$REF -q .sha. Er '$REF' derimod et rigtigt grennavn eller tag, så skriv det ud som refs/heads/$REF eller refs/tags/$REF — begge slipper forbi denne vagt og er samtidig dét, der gør det entydigt for git."
+            exit 1
+          fi
+          echo "ref '$REF' er ikke en forkortet SHA — videre."
+
   # ── Byg og push af imaget — kører KUN på runneren (S-354 punkt 1) ──────────
   #
   # Bygget bor i sit EGET job, fordi `packages: write` ellers fulgte med ind i
@@ -471,6 +534,7 @@ jobs:
   # før, og skal have `packages: write` for at kunne pushe), mens deploy-jobbet
   # nedenfor skruer ned til `packages: read`.
   build:
+    needs: [ref_gate]
     if: inputs.build_mode == 'registry'
     runs-on: ubuntu-latest
     outputs:
@@ -636,12 +700,17 @@ jobs:
           echo "::error title=Registry-bygget fejlede — husk at det ikke bærer hemmeligheder::build_mode=registry sender INGEN byggetids-hemmeligheder til docker build (ingen NPM_TOKEN, ingen secrets-mount). Henter din Dockerfile noget fra et privat register under bygget, fejler det her med 401/403 — og det er ikke et udløbet token, det er en mekanisme, der ikke findes endnu. crm er den app i huset, det gælder. Vejen videre er build_mode: on-host, indtil secrets-mount er bygget. Se 'Hvor imaget bygges' i AI-tools/.github/workflows/deploy-app.yml."
 
   deploy:
-    needs: [build]
+    needs: [ref_gate, build]
     # Byg-jobbet er SPRUNGET OVER i on-host-tilstand, og et sprunget `needs`
     # ville uden det her tage deploy-jobbet med sig. Betingelsen siger derfor
     # "kør, medmindre bygget FEJLEDE" — ikke `always()`, som ville rulle ud
     # oven på et fejlet byg.
-    if: ${{ !cancelled() && needs.build.result != 'failure' }}
+    #
+    # `ref_gate` skal stå EKSPLICIT her (S-452). `!cancelled()` er en
+    # tilsidesættelse af den normale needs-regel, så uden klausulen ville
+    # deploy-jobbet køre videre, selv om ref-vagten netop havde fældet — og
+    # vagten ville være pynt.
+    if: ${{ !cancelled() && needs.ref_gate.result == 'success' && needs.build.result != 'failure' }}
     runs-on: ubuntu-latest
     # Nedskaleringen (S-354 punkt 1). En genbrugsworkflow kan kun skrue NED,
     # aldrig op: `contents: read` bruges af checkout, `packages: read` er dét,
