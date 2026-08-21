@@ -21,6 +21,7 @@ on:
       - 'scripts/test-deploy-backup.sh'
       - 'scripts/test-deploy-remote-quoting.sh'
       - 'scripts/test-deploy-diskvagt-byggecache.sh'
+      - 'scripts/test-deploy-ref-vagt.sh'
 
 jobs:
   backup-step:
@@ -44,6 +45,14 @@ jobs:
       # er ikke en rettelse.
       - name: Test citeringen ind i den fjerne shell
         run: bash scripts/test-deploy-remote-quoting.sh
+
+      # S-452: en forkortet commit-SHA må ikke nå frem til actions/checkout,
+      # som slår den op som et GRENNAVN og fejler med en besked, der ikke
+      # nævner refs. Testen måler både at vagten fælder, at den IKKE fælder et
+      # lovligt grennavn — den ville ellers brække alle fire apper — og at
+      # beskeden stadig bærer sin vej videre.
+      - name: Test ref-vagten
+        run: bash scripts/test-deploy-ref-vagt.sh
 
   diskvagt-byggecache:
     name: Byggecache-oprydningen i diskvagten
