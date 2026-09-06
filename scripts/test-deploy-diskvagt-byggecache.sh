@@ -75,7 +75,8 @@ if not m:
 body = "\n".join(l[10:] if l.startswith(" " * 10) else l for l in m.group(1).split("\n"))
 if "${{" in body:
     sys.exit("Diskvagt-body'en indeholder GitHub-udtryk — så kan den ikke testes. "
-             "Send værdien ind som positionsargument i stedet.")
+             "Send værdien ind som en navngiven tildeling på stdin i stedet "
+             "(se S-447 og noten i trinnet).")
 open(sys.argv[2], "w").write(body + "\n")
 PY
 [ -s "$SCRIPT_BODY" ] || exit 1
@@ -147,8 +148,17 @@ krav() { # krav <beskrivelse> <0=skal-findes|1=skal-væk> <markør>
   else [ "$2" = "1" ] && ok "$1" || fejl "$1 (posten er væk)"; fi
 }
 
+# S-447: kroppen læser ikke længere `$1..$5`. Værdierne kommer som NAVNGIVNE
+# tildelinger, runneren skriver foran kroppen på stdin, så en tom værdi ikke
+# kan forsvinde i ssh's fladning. Testen kalder derfor kroppen med de samme
+# navne i miljøet — samme binding, uden en ssh imellem.
 koer() { # koer <registry_mode> <builder_keep_hours>
-  bash "$SCRIPT_BODY" "$TMP" "" 3 "$1" "$2" 2>&1
+  APP_DIR="$TMP" \
+  IMAGE_REPO="" \
+  IMAGE_KEEP=3 \
+  REGISTRY_MODE="$1" \
+  BUILDER_KEEP_HOURS="$2" \
+  bash "$SCRIPT_BODY" 2>&1
 }
 
 echo

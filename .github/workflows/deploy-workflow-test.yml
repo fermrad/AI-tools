@@ -21,6 +21,7 @@ on:
       - 'scripts/test-deploy-backup.sh'
       - 'scripts/test-deploy-remote-quoting.sh'
       - 'scripts/test-deploy-diskvagt-byggecache.sh'
+      - 'scripts/test-deploy-diskvagt-fladning.sh'
       - 'scripts/test-deploy-ref-vagt.sh'
 
 jobs:
@@ -53,6 +54,17 @@ jobs:
       # beskeden stadig bærer sin vej videre.
       - name: Test ref-vagten
         run: bash scripts/test-deploy-ref-vagt.sh
+
+      # S-447: diskvagtens værdier rejste som POSITIONSARGUMENTER over ssh, og
+      # `IMAGE_REPO` er tom pr. konstruktion for hver on-host-app. Det tomme
+      # argument forsvandt i ssh's fladning, resten rykkede en plads ned, og
+      # `set -u` dræbte vagten på linje 2 — målt på en rigtig staging-udrulning
+      # af area51 20-08-2026. Testen kører BEGGE former mod en falsk ssh, der
+      # gengiver fladningen: den gamle skal fældes af en tom værdi, den nye skal
+      # bestå den — og en registry-kontrol med en IKKE-tom værdi skal bestå
+      # begge, så det er argumentet og ikke miljøet, der er målt.
+      - name: Test diskvagtens vej ind i den fjerne shell
+        run: bash scripts/test-deploy-diskvagt-fladning.sh
 
   diskvagt-byggecache:
     name: Byggecache-oprydningen i diskvagten
