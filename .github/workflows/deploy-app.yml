@@ -257,6 +257,25 @@
 # fjerne shell så får at parse. Tom værdi bliver til `''`, så `APP_IMAGE=''` i
 # on-host-tilstand er uændret.
 #
+# Og kommer kroppen ALLIGEVEL ind på stdin (`ssh … bash -s`), findes der en
+# stærkere form end at citere ind i kommandostrengen: send værdierne som
+# NAVNGIVNE tildelinger FORAN kroppen på stdin, og lad selve ssh-kommandoen
+# være konstant.
+#
+#     { printf 'IMAGE_REPO=%q\n' "$IMAGE_REPO"
+#       cat << 'REMOTE'
+#       …
+#     REMOTE
+#     } | ssh … "root@${HOST}" bash -s
+#
+# Så har `$SHELL -c <streng>` slet ingen værdi at parse — værdien når aldrig
+# den shell. Og dét, der fældede diskvagten (S-447): en TOM værdi kan ikke
+# forsvinde. Den bliver til `IMAGE_REPO=''` på sin egen linje frem for et
+# argument, som ssh's fladning taber, hvorefter alle de følgende argumenter
+# rykker en plads ned og `$4` aldrig bliver sat. `ssh … bash -s -- "$A" "$B"`
+# er altså ikke bare svagere mod injektion; den kan TABE et argument, og den
+# binder på PLADS frem for på NAVN, så hver ny værdi omnummererer de gamle.
+#
 # Samme form bruges i `fermrad/project`s `deploy-pr-stack.yml` (S-411), så der
 # kun findes én måde at gøre det rigtigt på i huset.
 #
@@ -833,49 +852,68 @@ jobs:
           # `sync_path` med --delete, så en rapportfil i træet ville blive lagt ud
           # på HVER apps boks og blive liggende. Målt på staging 16-08-2026.
           RAPPORT="${RUNNER_TEMP:-/tmp}/disk-rapport.txt"
-          # ⚠️ CITERET, og det er IKKE kosmetik — se "Citering ind i en fjern
-          # shell" øverst i filen.
+          # ⚠️ VÆRDIERNE REJSER SOM NAVNGIVNE TILDELINGER PÅ STDIN — ikke som
+          # positionsargumenter. Det er ikke stil, det er en ANVENDELSE af
+          # reglen i "Citering ind i en fjern shell" øverst i filen, som
+          # allerede har afvist den anden vej med rene ord: «`ssh … bash -s --
+          # "$GIT_REF"`: ssh samler stadig argumenterne til én streng, som
+          # login-shellen parser.» Diskvagten fra S-362 blev bygget på præcis
+          # den kanal, noten frarådede.
+          #
+          # Hvad kanalen kostede, målt 20-08-2026 på en RIGTIG
+          # staging-udrulning af area51 (S-357):
+          #
+          #     Diskvagt og oprydning
+          #     bash: line 2: $4: unbound variable
           #
           # `IMAGE_REPO` kommer fra `needs.build.outputs.image_repo`, og
           # `build`-jobbet SPRINGES OVER i on-host-tilstand. Værdien er derfor
-          # TOM pr. konstruktion for hver on-host-app.
+          # TOM pr. konstruktion for hver on-host-app. ssh samler sine
+          # argumenter til ÉN streng, som den fjerne shell parser forfra: det
+          # tomme argument forsvandt i fladningen, resten rykkede en plads ned,
+          # `$4` blev aldrig sat, og `set -u` dræbte scriptet på linje 2.
           #
-          # ssh samler sine argumenter til ÉN streng, som den fjerne shell
-          # parser forfra. Et tomt argument forsvinder i den fladning: resten
-          # rykker en plads ned, `$4` bliver aldrig sat, og `set -u` dræber
-          # scriptet på linje 2 med `$4: unbound variable`.
+          # ssh-kommandoen er nu KONSTANT — `bash -s`, uden en eneste værdi i
+          # sig. Det er hele virkningen: sshd kører `$SHELL -c <streng>`, og
+          # den streng har ingenting at parse længere. Værdierne når aldrig dén
+          # shell. De rejser på STDIN, foran kroppen, og læses kun af den bash,
+          # de er skrevet til.
           #
-          # Målt 20-08-2026 på en rigtig staging-udrulning af area51 (S-357).
-          # Fejlen har været latent siden S-362 og rammer HVER on-host-app —
-          # crm og devhub brækker i det sekund, deres pin flytter forbi den.
-          # project er upåvirket, fordi den er `registry`, og det er derfor
-          # ingen har set det.
+          # NAVN frem for PLADS er dét, der lukker klassen — ikke citeringen:
+          #   * en tom værdi bliver til `IMAGE_REPO=''` på sin egen linje. Den
+          #     kan hverken forsvinde eller skubbe sine naboer, uanset hvad den
+          #     indeholder.
+          #   * der er ingen plads at rykke: S-365 hængte allerede en femte
+          #     værdi på halen, og næste punkt, der skal sende én mere, kan
+          #     ikke omnummerere de andre.
+          #
+          # `printf '%q'` alene (#65) gjorde tomheden SYNLIG som `''`, og det
+          # virkede — men den lod kanalen stå, hvor argument N's betydning
+          # afhænger af, at 1..N-1 alle overlevede fladningen. Her er der
+          # ingen N. `%q` bliver stående som citering af selve værdien, jf.
+          # filens egen regel; den bærer bare ikke længere tomheden alene.
           #
           # `-n "$IMAGE_REPO"`-vagten længere nede er RIGTIG og var der i
-          # forvejen — den var bare uopnåelig, fordi tildelingen dør to linjer
-          # tidligere. Rettelsen gør vagten nåelig; den erstatter den ikke.
+          # forvejen — den var bare uopnåelig, fordi tildelingen døde to linjer
+          # tidligere. Formen her gør vagten nåelig; den erstatter den ikke.
           #
           # `${4:-}` ville have været ét tegn — og ville have gjort en højlydt
           # fejl tavs: ethvert argument kunne rykke sig, og en forkert værdi
-          # ville lande i en rigtigt navngivet variabel.
-          Q_APP_DIR=$(printf '%q' "$APP_DIR")
-          Q_IMAGE_REPO=$(printf '%q' "$IMAGE_REPO")
-          Q_IMAGE_KEEP=$(printf '%q' "$IMAGE_KEEP")
-          Q_REGISTRY_MODE=$(printf '%q' "$REGISTRY_MODE")
-          # Citeret af samme grund som de fire ovenfor, og ikke fordi den
-          # ligner dem: `builder_keep_hours` er valgfri, og en kalder, der
-          # sender den tom, ville uden `%q` lade argumentet forsvinde i ssh's
-          # fladning — altså præcis fejlen fra #65 igen, bare et argument
-          # længere nede.
-          Q_BUILDER_KEEP=$(printf '%q' "$BUILDER_KEEP_HOURS")
-          ssh -i ~/.ssh/deploy_key \
-            -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
-            "root@${HOST}" \
-            bash -s -- "$Q_APP_DIR" "$Q_IMAGE_REPO" "$Q_IMAGE_KEEP" "$Q_REGISTRY_MODE" "$Q_BUILDER_KEEP" \
-            << 'REMOTE' | tee "$RAPPORT"
+          # lande i en rigtigt navngivet variabel. `set -u` er stadig vagten,
+          # og den peger nu på et NAVN, ikke på et nummer.
+          {
+            printf 'APP_DIR=%q\n'            "$APP_DIR"
+            printf 'IMAGE_REPO=%q\n'         "$IMAGE_REPO"
+            printf 'IMAGE_KEEP=%q\n'         "$IMAGE_KEEP"
+            printf 'REGISTRY_MODE=%q\n'      "$REGISTRY_MODE"
+            printf 'BUILDER_KEEP_HOURS=%q\n' "$BUILDER_KEEP_HOURS"
+            cat << 'REMOTE'
           set -euo pipefail
-          APP_DIR="$1"; IMAGE_REPO="$2"; IMAGE_KEEP="$3"; REGISTRY_MODE="$4"
-          BUILDER_KEEP_HOURS="$5"
+          # APP_DIR, IMAGE_REPO, IMAGE_KEEP, REGISTRY_MODE og
+          # BUILDER_KEEP_HOURS er sat af de navngivne tildelinger, runneren
+          # skrev foran denne krop — se noten i trinnet ovenfor. Mangler én,
+          # dør `set -u` på DEN, der bruger den, og beskeden bærer variablens
+          # navn i stedet for et argumentnummer.
 
           # Inddata afgøres FØRST, før noget som helst røres. En tastefejl i en
           # apps workflow skal fælde trinnet dér, hvor intet er fjernet endnu —
@@ -1002,6 +1040,9 @@ jobs:
           echo "##DISK_PCT_FOER=${FOER}"
           echo "##DISK_PCT=${EFTER}"
           REMOTE
+          } | ssh -i ~/.ssh/deploy_key \
+                -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+                "root@${HOST}" bash -s | tee "$RAPPORT"
 
           PCT="$(sed -n 's/^##DISK_PCT=//p' "$RAPPORT" | tail -n 1)"
           FOER_PCT="$(sed -n 's/^##DISK_PCT_FOER=//p' "$RAPPORT" | tail -n 1)"
