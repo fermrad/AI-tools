@@ -127,16 +127,64 @@
 #      også gavner en app, som ikke har valgt registry til. `prune` rører pr.
 #      definition ikke et image, en container hænger på.
 #
-#   3. BYGGECACHE — to bokse, to regler, fordi cachen betyder to forskellige
-#      ting de to steder.
+#   3. BYGGECACHE — ÉN regel, `--filter until=`, i begge tilstande. Kun
+#      DEFAULTEN skiller dem ad. Sådan har det ikke altid været:
 #
-#      `build_mode: registry` → `docker builder prune -af`. En registry-boks
-#      bygger ALDRIG, så cachen er død vægt fra fødslen (prod bar 10,25 GB af
-#      den slags). Uændret siden S-362 — "Registry-udrulningen har ingen
-#      oprydning — staging-boksen løb tør for disk efter ti deploys".
+#      ⚠️ `docker builder prune -af` er DÆMON-GLOBALT. Det er ikke appens
+#      cache, det er VÆRTENS. På en delt boks sletter én apps udrulning
+#      derfor naboernes — og `until=`-reglen nedenfor kan ikke forsvare sig
+#      mod det: naboens `-af` fejer alt væk uanset alder. Det er S-480 —
+#      "Én apps deploy sletter naboernes byggecache — `prune -af` er
+#      dæmon-globalt, ikke app-lokalt".
+#
+#      S-362 — "Registry-udrulningen har ingen oprydning — staging-boksen løb
+#      tør for disk efter ti deploys" — indførte `-af` i registry-vejen, og
+#      begrundelsen holdt: en registry-boks bygger ALDRIG, så cachen er død
+#      vægt (prod bar 10,25 GB). Men den holdt for APPEN, ikke for BOKSEN.
+#      De 10,25 GB var residuet fra dengang project selv byggede on-host —
+#      en engangsoprydning. Siden project blev `build_mode: registry`,
+#      efterlader den ingen cache overhovedet, og `-af` har derfor intet af
+#      appens EGET at hente. Den frigør udelukkende naboernes levende cache.
+#
+#      Målt 06-09-2026 (S-480) på den offentlige prod-boks, hvor project,
+#      crm og devhub deler vært:
+#
+#        * `RUN npm ci` for devhub kørte forfra i 13 af 15 udrulninger, hvor
+#          `package-lock.json` var UÆNDRET siden foregående deploy. Det lag
+#          afhænger kun af låsefilen; kørte det alligevel, var cachen væk.
+#          De 2 undtagelser lå minutter efter appens eget foregående byg,
+#          uden en project-udrulning imellem.
+#        * Prisen pr. ramt udrulning: ~55-60 s for devhub, ~96 s for crm.
+#          Resten af byggetiden rører prunen ikke — `npm run build` falder
+#          ved enhver kildeændring, og `exporting layers` (det største
+#          enkeltlag) tager det samme varm som kold.
+#
+#      ⭐ Og der er ingen boks tilbage, hvor `-af` gavner nogen: de to bokse
+#      med kun ÉN app (area51, intern prod + intern staging) kører
+#      `build_mode: on-host` og når aldrig registry-grenen. Den eneste
+#      registry-app i huset er project, og project deler BEGGE sine bokse
+#      med crm og devhub. `-af`-grenen blev altså i praksis kun nogensinde
+#      nået dér, hvor den var forkert. Derfor er den væk, frem for gjort
+#      betinget af en boks-optælling, workflowet ikke har.
+#
+#      `build_mode: registry` → `docker builder prune -f --filter
+#      until=<REGISTRY_KEEP_HOURS>h`, default 168 (en uge). Stadig hårdt nok
+#      til at rydde det døde: `until=` snitter på SIDST BRUGT, så naboens
+#      varme poster nulstiller deres eget ur og ældes aldrig ud, mens alt,
+#      ingen har rørt i en uge, går. En app kan hæve eller sænke tallet med
+#      `builder_keep_hours`. Der er ingen "slukket"-tilstand i registry-vejen
+#      — den har aldrig haft en, og en registry-boks har ingen grund til at
+#      beholde cache for evigt.
+#
+#      ⚠️ Bemærk at en uge IKKE dækker en app, der ruller ud sjældnere end
+#      det. crm ruller ud omtrent månedligt og betaler derfor stadig sit
+#      kolde byg (~96 s) de fleste gange. Det er et bevidst valg: devhub
+#      ruller ud 2-3 gange om ugen og bærer langt størstedelen af regningen.
+#      Skal crm også dækkes, er tallet at hæve, ikke reglen at ændre.
 #
 #      `build_mode: on-host` → `docker builder prune -f --filter
 #      until=<builder_keep_hours>h`, og **kun hvis appen har sat inputtet**.
+#      UÆNDRET af S-480 — ingen on-host-app skifter adfærd.
 #      Default er `0`, altså SLUKKET: fire apps kalder denne fil, og en ny
 #      oprydning må ikke ændre adfærd for nogen, der ikke har bedt om den.
 #      Et ubetinget `-af` ville gøre mest skade netop her — dev-boksen er
@@ -424,9 +472,12 @@ on:
         # Snittet er SIDST BRUGT, ikke skabt — en cachepost, byggene stadig
         # genbruger, nulstiller sit eget ur og ældes aldrig ud.
         #
-        # Ignoreres ved `build_mode: registry`: dér bygges der aldrig, og
-        # cachen ryddes helt (`-af`) som hidtil.
-        description: 'Ryd byggecache, der ikke har været brugt i så mange timer (0 = slået fra; kun build_mode: on-host)'
+        # Ved `build_mode: registry` gælder tallet OGSÅ, men `0` betyder dér
+        # ikke "slukket" — det betyder "brug husets registry-default på 168
+        # timer". En registry-boks bygger aldrig selv, så cachen på den er
+        # naboernes; at lade den ligge for evigt er ikke en tilstand, nogen
+        # har brug for. Se S-480 i afsnittet "Diskvagt og oprydning" øverst.
+        description: 'Ryd byggecache, der ikke har været brugt i så mange timer (on-host: 0 = slået fra. registry: 0 = husets default på 168 t)'
         required: false
         type: number
         default: 0
@@ -933,6 +984,16 @@ jobs:
           else
             BUILDER_KEEP_TIL=0
           fi
+          # S-480: registry-vejen har ingen "slukket"-tilstand. Satte appen
+          # ikke et tal, falder den tilbage på husets default frem for på
+          # `-af` — snittet er stadig hårdt, men det er et SNIT, ikke en
+          # global fejning af naboernes cache. Rækkefølgen er vigtig: dette
+          # sker EFTER valideringen ovenfor, så en tastefejl stadig fælder
+          # trinnet i stedet for tavst at blive erstattet af defaulten.
+          if [ "$REGISTRY_MODE" = "1" ] && [ "$BUILDER_KEEP_TIL" = "0" ]; then
+            BUILDER_KEEP_HOURS=168
+            BUILDER_KEEP_TIL=1
+          fi
 
           # Docker-roden er dét, et pull fylder op; app-mappen er dét, rsync og
           # backup fylder op. På dev-boksen er app-mappen et symlink til et
@@ -1011,20 +1072,26 @@ jobs:
           echo "── Hængende images"
           docker image prune -f 2>&1 | tail -n 1 || true
 
-          # 3) Byggecache. To tilstande, to regler, fordi cachen betyder to
-          #    forskellige ting de to steder — se afsnittet øverst i filen.
+          # 3) Byggecache. ÉN regel — `--filter until=` — i begge tilstande.
+          #    Kun defaulten skiller dem ad; se afsnittet øverst i filen.
           #
-          #    registry: boksen bygger ALDRIG, så alt kan gå (uændret).
+          #    ⚠️ `-af` er VÆK (S-480). Det var dæmon-globalt, altså værtens
+          #    cache og ikke appens, og på de to bokse hvor registry-grenen
+          #    overhovedet nås, deler project vært med crm og devhub. Målt
+          #    06-09-2026: devhubs `npm ci` kørte forfra i 13 af 15 byg med
+          #    uændret låsefil.
           #
-          #    on-host: cachen er dét, næste byg genbruger. `until=` snitter på
-          #    SIDST BRUGT, så en post, byggene stadig rammer, nulstiller sit
-          #    eget ur og ældes aldrig ud — derfor kan reglen være hård uden at
-          #    ramme det varme. Den gælder først, når appen har sat inputtet.
-          if [ "$REGISTRY_MODE" = "1" ]; then
-            echo "── Byggecache (boksen bygger ikke i registry-tilstand)"
-            docker builder prune -af 2>&1 | tail -n 1 || true
-          elif [ "$BUILDER_KEEP_TIL" = "1" ]; then
-            echo "── Byggecache ubrugt i over ${BUILDER_KEEP_HOURS} timer (alt nyere beholdes)"
+          #    `until=` snitter på SIDST BRUGT, ikke på skabt, så en post
+          #    byggene stadig rammer nulstiller sit eget ur og ældes aldrig
+          #    ud. Derfor kan reglen være hård uden at ramme det varme — og
+          #    derfor er den forsvarlig også på en boks, der aldrig bygger:
+          #    det døde går, naboens levende bliver.
+          if [ "$BUILDER_KEEP_TIL" = "1" ]; then
+            if [ "$REGISTRY_MODE" = "1" ]; then
+              echo "── Byggecache ubrugt i over ${BUILDER_KEEP_HOURS} timer (boksen bygger ikke selv, men den kan DELES — alt nyere beholdes)"
+            else
+              echo "── Byggecache ubrugt i over ${BUILDER_KEEP_HOURS} timer (alt nyere beholdes)"
+            fi
             docker builder prune -f --filter "until=${BUILDER_KEEP_HOURS}h" 2>&1 | tail -n 1 || true
           else
             echo "── Byggecache: urørt — build_mode er on-host, og cachen er dét, næste byg genbruger (builder_keep_hours: 0)"

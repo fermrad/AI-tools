@@ -2,7 +2,15 @@
 #
 # Test af BYGGECACHE-oprydningen i "Diskvagt og oprydning" i
 # .github/workflows/deploy-app.yml (S-365 — "De interne bokse bærer 42 GB
-# byggecache — S-362's oprydning rører dem med vilje ikke").
+# byggecache — S-362's oprydning rører dem med vilje ikke", udvidet af
+# S-480 — "Én apps deploy sletter naboernes byggecache — `prune -af` er
+# dæmon-globalt, ikke app-lokalt").
+#
+# S-480 flyttede registry-vejen fra `-af` til det samme alderssnit. Blok D og
+# E er dén ændrings prøve: D viser, at naboens VARME cache nu overlever en
+# registry-udrulning, E at det DØDE stadig ryddes. Peger man testen på
+# udgaven før (`git show 489c438:.github/workflows/deploy-app.yml`), skal D
+# fejle — det er hele grunden til, at blokken kan måle noget.
 #
 # Hvorfor den kører mod en RIGTIG docker-dæmon og ikke mod en stub:
 # hele reglen hviler på én påstand om buildkit, som ingen stub kan bekræfte —
@@ -51,8 +59,9 @@ KOER_ID="s365-$$-$(date +%s)"
 NABO_TAG="diskvagt-test-nabo:$KOER_ID"
 GAMMEL_TAG="diskvagt-test-gammel:$KOER_ID"
 NY_TAG="diskvagt-test-ny:$KOER_ID"
+DOED_TAG="diskvagt-test-doed:$KOER_ID"
 oprydning() {
-  docker image rm -f "$NABO_TAG" "$GAMMEL_TAG" "$NY_TAG" >/dev/null 2>&1 || true
+  docker image rm -f "$NABO_TAG" "$GAMMEL_TAG" "$NY_TAG" "$DOED_TAG" >/dev/null 2>&1 || true
   rm -rf "$TMP"
 }
 trap oprydning EXIT
@@ -195,11 +204,53 @@ krav "ny cachepost overlever"                            0 "$KOER_ID-ny"
 har_image "$NABO_TAG" && ok "nabo-imaget overlever" || fejl "nabo-imaget forsvandt"
 
 echo
-echo "D) registry-tilstand er uændret: alt går, men images røres ikke"
+echo "D) registry-tilstand FEJER IKKE naboens varme cache væk (S-480)"
+# Dette er punktets kerne, og det er dét, `-af` gjorde forkert. `docker
+# builder prune -af` er DÆMON-GLOBALT: det rammer værtens cache, ikke appens.
+# `delt` og `ny` er lige blevet BRUGT af fixturens byg — de er præcis det, en
+# nabo-app ville genbruge ved sit næste byg. Uden et tal fra appen falder
+# registry-vejen tilbage på husets default (168 timer), og så skal begge stå.
+#
+# ⚠️ Peger man testen på udgaven FØR S-480, skal DENNE blok fejle på begge
+# krav: dér ryddede `-af` dem uanset alder. Det er sådan, testen kan fælde
+# den gamle adfærd.
 UD="$(koer 1 0)"; RC=$?
 [ "$RC" -eq 0 ] && ok "trinnet går igennem" || fejl "trinnet fejlede (exit $RC)"
-krav "delt cachepost er ryddet af -af" 1 "$KOER_ID-delt"
-krav "ny cachepost er ryddet af -af"   1 "$KOER_ID-ny"
+grep -q "168 timer" <<<"$UD" && ok "loggen nævner husets registry-default" || fejl "loggen nævner ikke defaulten på 168 timer"
+grep -q -- "-af" <<<"$UD" && fejl "loggen nævner stadig -af" || ok "ingen -af i registry-vejen"
+krav "delt cachepost OVERLEVER (varm, ville være røget på -af)" 0 "$KOER_ID-delt"
+krav "ny cachepost OVERLEVER (varm, ville være røget på -af)"   0 "$KOER_ID-ny"
+har_image "$NABO_TAG" && ok "nabo-imaget overlever stadig" || fejl "nabo-imaget forsvandt"
+
+echo
+echo "E) registry-tilstand rydder stadig det DØDE"
+# Mildere er ikke det samme som tandløs: S-362's grund — "staging-boksen løb
+# tør for disk efter ti deploys" — står ved magt, og reglen skal stadig hente
+# det, ingen har rørt. Frisk fixtur, fordi C allerede tog `gammel`.
+mkdir -p "$TMP/doed"
+printf 'FROM %s\nRUN echo %s-doed > /doed\n' "$BASE_IMAGE" "$KOER_ID" > "$TMP/doed/Dockerfile"
+byg doed "$DOED_TAG" || { echo "FEJL  kunne ikke bygge doed-fixturen" >&2; exit 1; }
+docker image rm "$DOED_TAG" >/dev/null 2>&1 || true
+T_DOED="$(date +%s)"
+
+sleep "$GAP"
+
+# Genbyg `ny`: det RØRER `delt` og `ny` igen, så deres "sidst brugt"-ur
+# nulstilles og lander på den unge side af snittet. Det er hele pointen med
+# until= — den varme post ældes aldrig ud.
+byg ny "$NY_TAG" || { echo "FEJL  kunne ikke genbygge ny-fixturen" >&2; exit 1; }
+docker image rm "$NY_TAG" >/dev/null 2>&1 || true
+T_NY2="$(date +%s)"
+
+NU="$(date +%s)"
+MIDT2=$(( (T_DOED + T_NY2) / 2 ))
+TIMER2="$(awk -v s=$(( NU - MIDT2 )) 'BEGIN { printf "%.6f", s / 3600 }')"
+echo "     mellemrum ${GAP}s, snit $(( NU - MIDT2 ))s tilbage i tiden = ${TIMER2} timer"
+UD="$(koer 1 "$TIMER2")"; RC=$?
+[ "$RC" -eq 0 ] && ok "trinnet går igennem" || fejl "trinnet fejlede (exit $RC)"
+krav "død cachepost er RYDDET"                     1 "$KOER_ID-doed"
+krav "delt cachepost overlever (brugt efter snit)" 0 "$KOER_ID-delt"
+krav "ny cachepost overlever"                      0 "$KOER_ID-ny"
 har_image "$NABO_TAG" && ok "nabo-imaget overlever stadig" || fejl "nabo-imaget forsvandt"
 
 echo
