@@ -131,8 +131,10 @@ trinnene — det er hele pointen.
   og et CI-job samtidig deler 16 tråde — det virker, men mål tiderne, hvis noget ser
   langsomt ud. Runneren tager ét job ad gangen; CI's postgres er sin egen container på 5432,
   agenternes baser ligger i dev-instansen på 5433.
-- **Strømtest uafprøvet** (pr. 03-09-2026): `Restore on AC Power Loss` er sat, aldrig set
-  virke. Er hesten offline efter et strømsvigt, er det derfor.
+- **Strømtest bestået 06-09-2026.** `Restore on AC Power Loss → Power On` virker: pænt
+  `sudo poweroff`, stik ude ti sekunder, ingen tænd-knap — bootede selv og svarede over Tailscale
+  ~5 s efter strøm. Runner, Tailscale, SSH (socket-aktiveret) og `ferm-projects-db` kom op uden
+  hjælp. Et strømsvigt koster altså boot-tiden, ikke 24 timers kø.
 
 ## Hvornår IKKE hesten
 
