@@ -75,12 +75,19 @@ export $(grep "^export NPM_TOKEN" ~/.bashrc | sed "s/^export //" | head -1)
 npm ci >/dev/null 2>&1
 set -a; . ./.env; set +a
 npx prisma db push --skip-generate >/dev/null 2>&1 && npx prisma generate >/dev/null 2>&1
-nohup claude -p "$(cat ~/opgave-<punkt>.md)" --dangerously-skip-permissions > ~/<punkt>.log 2>&1 &
+nohup claude -p "$(cat ~/opgave-<punkt>.md)" --model sonnet --dangerously-skip-permissions > ~/<punkt>.log 2>&1 &
 echo "startet — pid $! i ~/wt/<punkt> mod projects_<punkt>"'
 ```
 
 `--dangerously-skip-permissions` er det, laptoppens agenter også kører med — forskellen
 er maskinen, ikke tilliden. Hesten har egen GitHub-nøgle og kan pushe.
+
+**`--model sonnet` er standarden.** Ugekvoten for «alle modeller» stod 18-09-2026 på 78 %
+med fem dage tilbage, mens Fable-andelen var 34 % — det er agenterne, ikke samtalerne, der
+fylder. Et velbeskrevet punkt (briefen bærer hele DevHub-teksten, husets regler og
+målekravene) er Sonnet-arbejde. Tag `--model opus` eller udelad flaget (Fable) kun når
+punktet rører **adgangsmodellen**, et **skema med datatab**, eller når briefen selv siger
+«beslut» frem for «byg». Skriv valget i briefen, så rapporten kan læses derefter.
 
 **Sig til brugeren, at agenten kører, og at den overlever laptoppen.** Gæt ikke på
 varighed — et S-punkt af størrelse S/M tager typisk ½–1½ time.
