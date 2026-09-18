@@ -5,6 +5,18 @@ description: Review staged changes or a PR diff for bugs, security issues, and q
 
 Review the current changes (staged diff, a PR number, or a specific file range).
 
+**Scope the review before you start — it is the single biggest token cost in the flow.**
+A full review of a 41-file PR by a subagent cost ~150k tokens (measured 06-09-2026, devhub#87).
+Before delegating or reading:
+
+- Name the **files and questions** that matter: auth boundaries, data writes, migrations,
+  Dockerfile/CI. Pass that list — not "review the PR".
+- Tests, docs and generated files (`package-lock.json`, `*.md`, `prisma/migrations`) are read
+  only when a question points at them.
+- One reviewer per PR. A second (security) pass only when auth, sessions, uploads or API
+  boundaries changed — see `sikkerhedsgennemgang`.
+- Delegate the read-through to `--model sonnet`; keep the verdict and the fixes here.
+
 1. **Get the diff** — use whichever is relevant:
    ```bash
    git diff HEAD          # unstaged changes
