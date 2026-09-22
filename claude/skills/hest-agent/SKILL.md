@@ -7,18 +7,44 @@ description: Sæt en Claude Code-agent i gang på fermhest (hesten) — husets e
 
 `fermhest` er husets mini-PC på kontoret (Ryzen 7 5825U, 8C/16T, 14 GB). Den nås som
 **`ssh hest`** over Tailscale, uanset hvilket net den står på. Alle `fermrad`-repos ligger
-i `~/localprojects/`, dev-Postgres kører på **5433**, Claude Code er logget ind.
+i `~/localprojects/`, dev-Postgres kører på **5433**, og Claude Code kører på husets egen
+API-nøgle, ikke på nogens abonnement. Læs «Hesten betaler pr. token» før du starter noget.
 
 Agenten kører som `claude -p` under `nohup`. **Den overlever, at din session og din
 laptop lukkes.** Det er hele formålet.
 
+## Hesten betaler pr. token
+
+Siden 22-09-2026 kører Claude Code på hesten på en **API-nøgle** fra husets egen
+Anthropic-organisation. Der er ikke længere en personlig indlogning på maskinen. Nøglen
+ligger i `~/.anthropic-api-key` med rettigheder 600, og `apiKeyHelper` i
+`~/.claude/settings.json` peger på den — hestens `.bashrc` springer over for
+ikke-interaktive shells og kan derfor ikke bære en miljøvariabel frem til en `nohup`-agent.
+
+Tre konsekvenser. Den første er den vigtigste:
+
+- **Muren er væk.** Før løb en løbsk kø tør for kvote og stoppede af sig selv. Nu koster
+  den penge, indtil nogen opdager det. Start aldrig en kø, du ikke selv kigger efter, og
+  sæt et loft for, hvor mange punkter den må tage.
+- **Forbrugsloftet sidder ikke på nøglen.** Det er en egenskab ved det *arbejdsområde*,
+  nøglen er født i, og sættes i konsollen. Er der intet arbejdsområde-loft, er der intet
+  loft.
+- **claude.ai-forbindelserne er slået fra** på hesten, fordi en API-nøgle har forrang.
+  Agenter dér har ingen DevHub-adgang — det havde de heller ikke før, og briefen regner
+  allerede med det.
+
 ## Før du starter — mål maskinen
 
 ```
-ssh -o BatchMode=yes hest 'uptime; cd ~/localprojects/<repo> && git status --short | head; git branch --show-current'
+ssh -o BatchMode=yes hest 'export PATH=$HOME/.npm-global/bin:$PATH
+uptime
+claude auth status | grep authMethod
+cd ~/localprojects/<repo> && git status --short | head; git branch --show-current'
 ```
 
 - Svarer den ikke: den er offline. **Stop.** Fald tilbage til en lokal agent. Meld det.
+- Siger `authMethod` ikke `api_key_helper`: **stop.** Så er nøglen faldet ud, og kørslen
+  ville lande på en persons abonnement i stedet for husets regning.
 - **Rør aldrig `~/localprojects/<repo>` selv** — det er hovedtræet, og en anden agent kan stå
   i det. Hver agent får sit eget arbejdstræ under `~/wt/<punkt>` med egen gren og egen
   database. Målt 03-09-2026: worktree + `npm ci` + `prisma generate` tager **17 s**, og
@@ -82,12 +108,16 @@ echo "startet — pid $! i ~/wt/<punkt> mod projects_<punkt>"'
 `--dangerously-skip-permissions` er det, laptoppens agenter også kører med — forskellen
 er maskinen, ikke tilliden. Hesten har egen GitHub-nøgle og kan pushe.
 
-**`--model sonnet` er standarden.** Ugekvoten for «alle modeller» stod 18-09-2026 på 78 %
-med fem dage tilbage, mens Fable-andelen var 34 % — det er agenterne, ikke samtalerne, der
-fylder. Et velbeskrevet punkt (briefen bærer hele DevHub-teksten, husets regler og
-målekravene) er Sonnet-arbejde. Tag `--model opus` eller udelad flaget (Fable) kun når
-punktet rører **adgangsmodellen**, et **skema med datatab**, eller når briefen selv siger
-«beslut» frem for «byg». Skriv valget i briefen, så rapporten kan læses derefter.
+**`--model sonnet` er standarden, og flaget skal ALTID med.** Et velbeskrevet punkt er
+Sonnet-arbejde: briefen bærer hele DevHub-teksten, husets regler og målekravene, så agenten
+skal bygge frem for at beslutte. Udelader du flaget, får du Claude Codes standardmodel under
+API-nøglen, og den er hverken garanteret eller gratis — skriv den, du mener.
+
+Prisen pr. million tokens er Sonnet 5 $2 ind / $10 ud, Opus 5 $5 / $25, Fable 5.1 $10 / $50.
+Til sammenligning kostede en code-review på 150.000 tokens under en halv dollar på Sonnet.
+Tag `--model opus` kun når punktet rører **adgangsmodellen**, et **skema med datatab**,
+eller når briefen selv siger «beslut» frem for «byg». Skriv valget i briefen, så rapporten
+kan læses derefter.
 
 **Sig til brugeren, at agenten kører, og at den overlever laptoppen.** Gæt ikke på
 varighed — et S-punkt af størrelse S/M tager typisk ½–1½ time.
