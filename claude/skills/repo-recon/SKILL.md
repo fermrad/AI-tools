@@ -1,6 +1,6 @@
 ---
 name: repo-recon
-description: Read-only survey of the fermrad GitHub org and Ferm's Claude guide before proposing or building anything — loads context and stops; the local clone is never the source of truth. Ends by prescribing the fixed skill flow (/run, /simplify, /code-review, /new-pr, /pr-preview) for the work that follows
+description: Read-only survey of the fermrad GitHub org and Ferm's Claude guide before proposing or building anything — loads context and stops; the local clone is never the source of truth. Ends by prescribing the fixed skill flow (/hest-agent, /run, /simplify, /code-review, /new-pr, /pr-preview) for the work that follows
 argument-hint: [app/repo name or topic]
 ---
 
@@ -114,7 +114,8 @@ End with a short recon summary:
 - what you'd suggest doing next — as a **proposal**, not a plan you begin executing.
   Map the proposal onto the fixed skill flow (step 6): name which skill each
   suggested step will use, so the session that follows picks them up at the right
-  times.
+  times. Say for each suggested point **where it runs and on which model** — the
+  laptop, or a queue on hesten, and `sonnet` unless the point earns `opus`/`fable`.
 
 Then **hand back to the user and wait.** Do not create branches, edit files, open
 PRs, or run migrations/deploys as part of recon — not even the "obvious first
@@ -127,19 +128,37 @@ Recon is stage 1 of a fixed process. Once the user gives the go-ahead, the work
 that follows uses the other skills at these points — invoke them, don't reimplement
 what they do:
 
-1. **Build** — branch from `main`, develop, and verify the change in the running
+1. **Where the work runs — `/hest-agent`.** Settle this before anything is built;
+   it is part of the proposal, not an afterthought. A point that is **decision-free
+   and fully specified** belongs on **fermhest**, the house's own machine
+   (`/hest-agent`): it survives the laptop closing, and several points queue behind
+   each other. Keep on the laptop anything that needs a human mid-task, touches
+   **prod data or prod keys** (hesten has neither, by design), or requires DevHub
+   writes while it runs — hesten has no DevHub connection, so the bookkeeping is
+   done from the laptop on the agent's report. One agent per repo working tree.
+
+   **Name the model.** Agents run on `--model sonnet` by default; `opus` or `fable`
+   only when the point touches the **access model**, a **schema with data loss**, or
+   asks the agent to *decide* rather than build. The choice goes in the brief. It is
+   a cost decision as much as a quality one: an agent point is by far the largest
+   consumer of the weekly quota, so check the quota before proposing a queue of
+   several points, and say in the report what the queue will cost.
+
+2. **Build** — branch from `main`, develop, and verify the change in the running
    app with **`/run`** (tests passing is not the same as the app working).
-2. **`/simplify`** — after any substantial change: reuse/simplification pass.
+3. **`/simplify`** — after any substantial change: reuse/simplification pass.
    Quality only; it does not hunt bugs.
-3. **`/code-review`** — before every PR, on the staged diff. Add
+4. **`/code-review`** — before every PR, on the staged diff. Scope it first: name
+   the files and the concrete questions, one reviewer per PR — an unbounded
+   "review the PR" is the single most expensive thing this flow can do. Add
    **`/security-review`** whenever the change touches auth, sessions, file
    handling/uploads, or API boundaries.
-4. **`/new-pr`** — creates the PR to Ferm conventions (branch from `main`,
+5. **`/new-pr`** — creates the PR to Ferm conventions (branch from `main`,
    code + tests + docs, title format). If the fix lives in code copied from
    `boilerplate`/`lib` or duplicated across apps: patch upstream first and sweep
    the other apps (`gh search code --owner fermrad`) in the same flow — a bug
    fixed in one app still exists in the others.
-5. **`/pr-preview`** — see the branch live before merging. Never debug deploy or
+6. **`/pr-preview`** — see the branch live before merging. Never debug deploy or
    CI behavior with guess-commits on `main`; move to a branch with
    `workflow_dispatch` after two failed attempts and squash the result.
 

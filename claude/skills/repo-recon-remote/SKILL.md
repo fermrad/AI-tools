@@ -200,6 +200,11 @@ loses the review point the recon exists to create.
 Once the user gives the go-ahead, the work that follows uses these skills at
 these points — invoke them, don't reimplement what they do:
 
+⚠️ **`/hest-agent` is not available here.** Delegating a point to **fermhest**
+needs the developer laptop's Tailscale access; a cloud container has none. The
+work therefore runs in this session, or the report says which points should be
+queued on hesten later, from the laptop.
+
 1. **Build** — branch from `main`, develop, verify with **`/run`** (tests
    passing is not the same as the app working; see the step 5 limits).
 2. **`/simplify`** — after any substantial change: reuse/simplification pass.
