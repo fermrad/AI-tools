@@ -147,6 +147,7 @@ vaerdier = {
     "IMAGE_KEEP": "3",
     "REGISTRY_MODE": os.environ["REGISTRY_SUB"],
     "BUILDER_KEEP_HOURS": "0",
+    "JOURNALD_LOFT": "500M",
     "WARN_PCT": "90",
     "FAIL_PCT": "100",
 }
@@ -174,7 +175,8 @@ koer_ny() { # koer_ny <image_repo> <registry_mode>
 # GAMMEL: kroppen fra workflowet, men sendt over ssh som POSITIONSARGUMENTER —
 # kanalen fra S-362, som noten "Citering ind i en fjern shell" øverst i filen
 # allerede havde frarådet. Genskabt her og ikke kopieret fra en gammel fil, så
-# den gamle form testes mod den NUVÆRENDE krop.
+# den gamle form testes mod den NUVÆRENDE krop. (S-1290 hængte en sjette værdi,
+# JOURNALD_LOFT, på halen — præcis den omnummerering, navnebindingen undgår.)
 koer_gammel() { # koer_gammel <image_repo> <registry_mode>
   local krop="$TMP/gammel-krop.sh"
   # Tildelingerne skal ligge EFTER kroppens egen `set -euo pipefail`, præcis
@@ -182,7 +184,7 @@ koer_gammel() { # koer_gammel <image_repo> <registry_mode>
   # fejlen ville blive tavs i stedet for højlydt.
   { head -n 1 "$KROP"
     printf 'APP_DIR="$1"; IMAGE_REPO="$2"; IMAGE_KEEP="$3"; REGISTRY_MODE="$4"\n'
-    printf 'BUILDER_KEEP_HOURS="$5"\n'
+    printf 'BUILDER_KEEP_HOURS="$5"; JOURNALD_LOFT="$6"\n'
     tail -n +2 "$KROP"
   } > "$krop"
   head -n 1 "$KROP" | grep -q 'set -euo pipefail' || {
@@ -191,9 +193,10 @@ koer_gammel() { # koer_gammel <image_repo> <registry_mode>
   }
   ( export HOST=boks.example
     APP_DIR="$APP_DIR_SUB" IMAGE_REPO="$1" IMAGE_KEEP=3 REGISTRY_MODE="$2" BUILDER_KEEP_HOURS=0
+    JOURNALD_LOFT=500M
     "$TMP/ssh" -i ~/.ssh/deploy_key -o BatchMode=yes "root@${HOST}" \
       bash -s -- "$APP_DIR" "$IMAGE_REPO" "$IMAGE_KEEP" "$REGISTRY_MODE" "$BUILDER_KEEP_HOURS" \
-      < "$krop" ) 2>&1
+      "$JOURNALD_LOFT" < "$krop" ) 2>&1
 }
 
 # GAMMEL, som den stod 20-08: fire værdier, ingen builder_keep_hours endnu.

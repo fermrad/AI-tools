@@ -235,6 +235,49 @@
 # Vagten FEJLER LUKKET: kan målingen ikke læses ud af svaret, stopper deployet
 # frem for at fortsætte i tro på en tom disk-oplysning.
 #
+# ── journald får et loft (S-1290) ───────────────────────────────────────────
+#
+# Målt 09-10-2026 på den interne prod-boks (project, devhub og crm): disken
+# løb fuld, og det var IKKE Docker. 2,0 GB arkiverede journald-journaler lå
+# uden for alt, oprydningen ovenfor kigger på. Diskvagten målte 99 % → 92 %
+# med 0 B frigjort af Docker, lod deployet fortsætte, og så fyldte image-pull
+# og backup resten. Postgres svarede «No space left on device», DevHub stod
+# i recovery, og projects deploy fejlede. `journalctl --vacuum-size=200M` i
+# hånden bragte boksen ned på 67 %.
+#
+# Derfor to ting, og de er to forskellige beslutninger:
+#
+#   1. LOFTET — trinnet `journald får et loft` skriver
+#      `/etc/systemd/journald.conf.d/ferm-loft.conf` med `SystemMaxUse=500M`
+#      IDEMPOTENT: er filen allerede ordret som ønsket, gør trinnet INTET og
+#      siger det. Kun når filen ændres, genstartes systemd-journald og
+#      ryddes ned til loftet. Det ligger FØR diskvagten, så vagtens FØR-tal
+#      måler en boks med loft på.
+#
+#      Trinnet må ALDRIG fælde et deploy alene: et loft, der ikke kunne
+#      sættes, er en advarsel — diskvagten bagefter afgør stadig, om der er
+#      plads nok til at rulle ud. (`continue-on-error` + exit 0 på enhver
+#      fejl i trinnets egen krop.)
+#
+#   2. OPRYDNINGEN — diskvagten rydder også journald over loftet
+#      (`journalctl --vacuum-size=500M`) ved HVERT deploy. Det er ikke
+#      dobbeltarbejde: journald håndhæver `SystemMaxUse` ved rotation, og
+#      kunne trinnet ovenfor ikke sætte loftet, er oprydningen det eneste,
+#      der holder journalerne nede.
+#
+#   Og diskvagtens «Disk FØR/EFTER» viser nu også `journalctl --disk-usage`
+#   og de største poster (Docker images, byggecache, volumes, /var/backups),
+#   så næste fulde disk kan læses direkte i deployets log — 09-10 kunne den
+#   ikke, fordi vagten kun talte procenter.
+#
+#   Målingen er den SAMME krop som i `diskvagt.yml` — den daglige vagt, der
+#   melder over 85 % også på dage uden et deploy. Kroppen står mellem
+#   markørerne `MÅLEKROP START`/`MÅLEKROP SLUT` i begge filer og skal være
+#   ORD FOR ORD ens; `scripts/test-deploy-diskvagt-daglig.sh` sammenligner dem.
+#   (En genbrugsworkflow kan ikke læse en fil fra DETTE repo — runneren har
+#   kun kalderens checkout — så formen er den samme som backup-kroppen i
+#   `backup-db.yml`: to kopier, én test, der fælder enhver forskel.)
+#
 # SQL, som Prisma ikke ejer: `scripts/sql/*.sql`
 #
 # `prisma db push` kender ikke CHECK-constraints og triggere, og
@@ -997,11 +1040,95 @@ jobs:
             sleep 5
           done
 
+      # ── journald får et loft (S-1290) ──────────────────────────────────────
+      # FØR diskvagten, så vagtens FØR-tal måler en boks med loft på. Se
+      # afsnittet "journald får et loft" øverst i filen.
+      #
+      # Trinnet må ALDRIG fælde et deploy alene. Kroppen afslutter selv med
+      # exit 0 og en ::warning:: ved enhver fejl, og `continue-on-error` er
+      # selerne til det, kroppen ikke forudså. Diskvagten bagefter afgør
+      # stadig, om der er plads til at rulle ud.
+      #
+      # `JOURNALD_LOFT` står ORDRET ens her og i diskvagtens env — prøven i
+      # scripts/test-deploy-diskvagt-journald.sh fælder en forskel.
+      - name: journald får et loft
+        continue-on-error: true
+        env:
+          JOURNALD_LOFT: 500M
+        run: |
+          set -uo pipefail
+          RAPPORT="${RUNNER_TEMP:-/tmp}/journald-loft.txt"
+          # Samme transport som diskvagten: værdien rejser som en NAVNGIVEN
+          # tildeling foran kroppen på stdin, og ssh-kommandoen er konstant.
+          # Se "Citering ind i en fjern shell" øverst i filen.
+          {
+            printf 'JOURNALD_LOFT=%q\n' "$JOURNALD_LOFT"
+            cat << 'REMOTE'
+          set -uo pipefail
+          KONF_DIR=/etc/systemd/journald.conf.d
+          KONF="$KONF_DIR/ferm-loft.conf"
+          if ! command -v journalctl >/dev/null 2>&1 || ! command -v systemctl >/dev/null 2>&1; then
+            echo "Boksen har ikke systemd-journald — intet at sætte et loft på."
+            echo "##JOURNALD_LOFT=ingen-journald"
+            exit 0
+          fi
+          # Indholdet sammenlignes ORDRET. `$(…)` tager den afsluttende
+          # linjeskift af begge sider, så sammenligningen er symmetrisk.
+          OENSKET="$(printf '[Journal]\nSystemMaxUse=%s\n' "$JOURNALD_LOFT")"
+          if [ -f "$KONF" ] && [ "$(cat "$KONF")" = "$OENSKET" ]; then
+            echo "journald-loftet står allerede på ${JOURNALD_LOFT} i $KONF — intet ændret, journald er ikke genstartet."
+            journalctl --disk-usage 2>/dev/null || true
+            echo "##JOURNALD_LOFT=uaendret"
+            exit 0
+          fi
+          # Skriv til en nabofil og flyt den på plads: en halvskrevet konfig
+          # skal aldrig være dét, journald læser ved en genstart.
+          if ! { mkdir -p "$KONF_DIR" && printf '%s\n' "$OENSKET" > "$KONF.ny" && mv -f "$KONF.ny" "$KONF"; }; then
+            echo "Kunne ikke skrive $KONF."
+            echo "##JOURNALD_LOFT=fejl-skriv"
+            exit 0
+          fi
+          echo "Skrev $KONF (SystemMaxUse=${JOURNALD_LOFT})."
+          if ! systemctl restart systemd-journald; then
+            # Filen fjernes igen, så næste deploy ikke ser den som "uændret"
+            # og springer genstarten over — loftet skal enten virke eller
+            # forsøges igen, ikke stå i en fil, journald aldrig har læst.
+            rm -f "$KONF"
+            echo "Genstarten af systemd-journald fejlede — $KONF er fjernet igen, så næste deploy forsøger forfra."
+            echo "##JOURNALD_LOFT=fejl-genstart"
+            exit 0
+          fi
+          echo "systemd-journald genstartet."
+          if ! journalctl --vacuum-size="$JOURNALD_LOFT"; then
+            echo "##JOURNALD_LOFT=fejl-vacuum"
+            exit 0
+          fi
+          journalctl --disk-usage 2>/dev/null || true
+          echo "##JOURNALD_LOFT=skrevet"
+          REMOTE
+          } | ssh -i ~/.ssh/deploy_key \
+                -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+                "root@${HOST}" bash -s | tee "$RAPPORT"
+
+          UDFALD="$(sed -n 's/^##JOURNALD_LOFT=//p' "$RAPPORT" | tail -n 1)"
+          case "$UDFALD" in
+            uaendret)
+              echo "journald-loftet på ${DEPLOY_ENV} var allerede sat — intet gjort." ;;
+            skrevet)
+              echo "::notice title=journald fik et loft på ${DEPLOY_ENV}-boksen::SystemMaxUse=${JOURNALD_LOFT} er skrevet, journald genstartet og ryddet ned til loftet." ;;
+            ingen-journald)
+              echo "::notice title=Ingen journald på ${DEPLOY_ENV}-boksen::Boksen har ikke systemd-journald, så der er intet loft at sætte." ;;
+            *)
+              echo "::warning title=journald-loftet kunne ikke sættes på ${DEPLOY_ENV}-boksen (${UDFALD:-intet svar})::Deployet fortsætter — diskvagten i næste trin afgør stadig, om der er plads. Se trinnets log for, hvad boksen svarede. Uden loftet kan journald vokse, til disken er fuld (S-1290, 09-10-2026)." ;;
+          esac
+          exit 0
+
       # ── Diskvagt og oprydning (S-362) ──────────────────────────────────────
-      # FØRSTE trin efter ssh, og det er hele virkningen: alt herefter — backup,
-      # rsync, pull, migrationer, genstart — SKRIVER på boksen. Se afsnittet
-      # "Diskvagt og oprydning" øverst i filen for de tre oprydningers hver sin
-      # betingelse, og for hvorfor der måles BÅDE før og efter.
+      # Første trin efter ssh og journald-loftet, og det er hele virkningen:
+      # alt herefter — backup, rsync, pull, migrationer, genstart — SKRIVER på
+      # boksen. Se afsnittet "Diskvagt og oprydning" øverst i filen for de tre
+      # Docker-oprydningers hver sin betingelse, og for hvorfor der måles BÅDE
+      # før og efter; journald (punkt 4) står under "journald får et loft".
       #
       # Oprydningen er tålsom (`|| true`): en prune, der fejler, må ikke vælte en
       # udrulning, og gør den det, fanger vagten nedenfor den fulde disk
@@ -1019,6 +1146,9 @@ jobs:
           BUILDER_KEEP_HOURS: ${{ inputs.builder_keep_hours }}
           WARN_PCT: ${{ inputs.disk_warn_percent }}
           FAIL_PCT: ${{ inputs.disk_fail_percent }}
+          # S-1290: oprydningen rydder journald ned til SAMME loft, som
+          # trinnet `journald får et loft` skriver. Ordret ens begge steder.
+          JOURNALD_LOFT: 500M
         run: |
           # pipefail er ikke valgfri: uden den ville `ssh … | tee` returnere
           # TEE's status, og en boks, der ikke svarer, ville se ud som en
@@ -1083,10 +1213,11 @@ jobs:
             printf 'IMAGE_KEEP=%q\n'         "$IMAGE_KEEP"
             printf 'REGISTRY_MODE=%q\n'      "$REGISTRY_MODE"
             printf 'BUILDER_KEEP_HOURS=%q\n' "$BUILDER_KEEP_HOURS"
+            printf 'JOURNALD_LOFT=%q\n'      "$JOURNALD_LOFT"
             cat << 'REMOTE'
           set -euo pipefail
-          # APP_DIR, IMAGE_REPO, IMAGE_KEEP, REGISTRY_MODE og
-          # BUILDER_KEEP_HOURS er sat af de navngivne tildelinger, runneren
+          # APP_DIR, IMAGE_REPO, IMAGE_KEEP, REGISTRY_MODE, BUILDER_KEEP_HOURS
+          # og JOURNALD_LOFT er sat af de navngivne tildelinger, runneren
           # skrev foran denne krop — se noten i trinnet ovenfor. Mangler én,
           # dør `set -u` på DEN, der bruger den, og beskeden bærer variablens
           # navn i stedet for et argumentnummer.
@@ -1120,6 +1251,11 @@ jobs:
             BUILDER_KEEP_TIL=1
           fi
 
+          # ── MÅLEKROP START (S-1290) ──────────────────────────────────────────
+          # ORD FOR ORD ens i deploy-app.yml og diskvagt.yml — rediger aldrig kun
+          # den ene; scripts/test-deploy-diskvagt-daglig.sh fælder enhver forskel.
+          # Kroppen MÅLER kun. Kræver APP_DIR (diskvagt.yml sætter /).
+          #
           # Docker-roden er dét, et pull fylder op; app-mappen er dét, rsync og
           # backup fylder op. På dev-boksen er app-mappen et symlink til et
           # ANDET volume, så de to kan være hver sit filsystem — og ved et
@@ -1147,9 +1283,24 @@ jobs:
               done; } | sort -u
           }
 
+          # HVAD der fylder (S-1290). 09-10-2026 sagde vagten kun "99 % → 92 %",
+          # og årsagen — 2,0 GB journald — stod ingen steder i loggen. Hver
+          # måling er tålsom (`|| true`): en post, der ikke kan måles, skal
+          # skrive "kunne ikke måles", ikke vælte målingen af procenten.
+          vis_poster() {
+            j="$(journalctl --disk-usage 2>/dev/null | sed -nE 's/.* take up ([^ ]+) .*/\1/p' | head -n 1 || true)"
+            printf '  %-26s %s\n' "journald" "${j:-(kunne ikke måles)}"
+            docker system df --format '{{.Type}}|{{.Size}}|{{.Reclaimable}}' 2>/dev/null \
+              | awk -F'|' '{printf "  %-26s %s   (kan frigøres: %s)\n", "docker " tolower($1), $2, $3}' || true
+            du -sh /var/backups/* 2>/dev/null | sort -rh | head -n 5 \
+              | awk '{printf "  %-26s %s\n", $2, $1}' || true
+          }
+          # ── MÅLEKROP SLUT ────────────────────────────────────────────────────
+
           FOER="$(maal_pct)"
           echo "── Disk FØR oprydning"
           vis_df
+          vis_poster
 
           # 1) Appens EGNE images. Fredningen kommer fra MASKINEN, ikke fra
           #    alder: hvert image-ID, en container hænger på — kørende ELLER
@@ -1222,9 +1373,24 @@ jobs:
             echo "── Byggecache: urørt — build_mode er on-host, og cachen er dét, næste byg genbruger (builder_keep_hours: 0)"
           fi
 
+          # 4) journald over loftet (S-1290). 09-10-2026 lå 2,0 GB arkiverede
+          #    journaler på den interne prod-boks, og punkt 1-3 frigjorde 0 B.
+          #    `--vacuum-size` rører kun ARKIVEREDE filer og kun over loftet,
+          #    så på en boks, der allerede er under, er det en no-op. Det står
+          #    her OGSÅ, selv om trinnet `journald får et loft` rydder, når det
+          #    skriver loftet: kunne det trin ikke sætte loftet, er dette det
+          #    eneste, der holder journalerne nede.
+          if command -v journalctl >/dev/null 2>&1; then
+            echo "── journald over loftet (${JOURNALD_LOFT})"
+            journalctl --vacuum-size="$JOURNALD_LOFT" 2>&1 | tail -n 1 || true
+          else
+            echo "── journald: ingen journalctl på boksen — springes over"
+          fi
+
           EFTER="$(maal_pct)"
           echo "── Disk EFTER oprydning"
           vis_df
+          vis_poster
           echo "Diskforbrug: ${FOER}% → ${EFTER}%"
 
           # Maskinlæsbare linjer til sidst. Tærsklerne afgøres på RUNNEREN, hvor
@@ -1252,12 +1418,12 @@ jobs:
           # Strengt større end, så disk_fail_percent: 100 slår stoppet fra uden
           # at slå målingen fra.
           if [ "$PCT" -gt "$FAIL_PCT" ]; then
-            echo "::error title=For lidt plads på ${DEPLOY_ENV}-boksen (${PCT}%)::Disken er over ${FAIL_PCT}% EFTER oprydningen, så pullet ville sandsynligvis dø midt i udrulningen — det var dét, der væltede projects staging 16-08-2026 (S-362). INTET er rørt endnu: hverken backup, kode, skema eller containere. Se 'docker system df' på boksen for hvad der fylder."
+            echo "::error title=For lidt plads på ${DEPLOY_ENV}-boksen (${PCT}%)::Disken er over ${FAIL_PCT}% EFTER oprydningen, så pullet ville sandsynligvis dø midt i udrulningen — det var dét, der væltede projects staging 16-08-2026 (S-362). INTET er rørt endnu: hverken backup, kode, skema eller containere. Se 'Disk FØR/EFTER' i trinnets log for hvad der fylder (journald, images, byggecache, volumes, /var/backups)."
             exit 1
           fi
 
           if [ "$PCT" -gt "$WARN_PCT" ]; then
-            echo "::warning title=Disken på ${DEPLOY_ENV}-boksen fylder (${PCT}%)::Over ${WARN_PCT}% efter oprydningen. Udrulningen fortsætter, men der er ikke mange tilbage — se 'docker system df' på boksen."
+            echo "::warning title=Disken på ${DEPLOY_ENV}-boksen fylder (${PCT}%)::Over ${WARN_PCT}% efter oprydningen. Udrulningen fortsætter, men der er ikke mange tilbage — se 'Disk EFTER' i trinnets log for hvad der fylder."
           fi
 
       - name: Ensure app directory exists on persistent volume
