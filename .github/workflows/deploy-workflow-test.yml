@@ -52,6 +52,11 @@ jobs:
       # nævner refs. Testen måler både at vagten fælder, at den IKKE fælder et
       # lovligt grennavn — den ville ellers brække alle fire apper — og at
       # beskeden stadig bærer sin vej videre.
+      #
+      # S-547: til production er vagten en port — kun en fuld SHA, som origin
+      # har. Testen kører kroppen mod en falsk `gh` og måler, at formen
+      # fældes FØR origin spørges, at 422 og 404 skilles ad, og at dev og
+      # staging aldrig spørger gh.
       - name: Test ref-vagten
         run: bash scripts/test-deploy-ref-vagt.sh
 
