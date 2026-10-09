@@ -161,12 +161,22 @@ krav() { # krav <beskrivelse> <0=skal-findes|1=skal-væk> <markør>
 # tildelinger, runneren skriver foran kroppen på stdin, så en tom værdi ikke
 # kan forsvinde i ssh's fladning. Testen kalder derfor kroppen med de samme
 # navne i miljøet — samme binding, uden en ssh imellem.
+#
+# S-1290: kroppen rydder også journald ned til JOURNALD_LOFT. Den del er IKKE
+# dét, denne test måler — dæmonen er — og en rigtig `journalctl --vacuum-size`
+# skal ikke røre maskinen, testen kører på. Derfor en falsk journalctl forrest
+# i PATH; journald-delen prøves i scripts/test-deploy-diskvagt-journald.sh.
+mkdir -p "$TMP/falsk-bin"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/falsk-bin/journalctl"
+chmod +x "$TMP/falsk-bin/journalctl"
 koer() { # koer <registry_mode> <builder_keep_hours>
+  PATH="$TMP/falsk-bin:$PATH" \
   APP_DIR="$TMP" \
   IMAGE_REPO="" \
   IMAGE_KEEP=3 \
   REGISTRY_MODE="$1" \
   BUILDER_KEEP_HOURS="$2" \
+  JOURNALD_LOFT=500M \
   bash "$SCRIPT_BODY" 2>&1
 }
 

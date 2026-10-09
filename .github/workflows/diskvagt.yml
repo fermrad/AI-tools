@@ -1,0 +1,240 @@
+# Daglig diskvagt for en Ferm-boks — kaldes fra hver apps egen planlagte
+# workflow via `uses: fermrad/AI-tools/.github/workflows/diskvagt.yml@<sha>`.
+#
+# HVORFOR den findes (S-1290): 09-10-2026 løb den interne prod-boks — project,
+# devhub og crm — tør for disk. Årsagen var 2,0 GB arkiverede
+# journald-journaler, og ingen så dem komme: den eneste diskmåling i huset
+# boede i deploy-app.yml's diskvagt, og den måler kun, NÅR der deployes. Dét
+# deploy målte 99 % → 92 % efter en Docker-oprydning, der frigjorde 0 B, og
+# så fyldte image-pull og backup resten. Postgres svarede «No space left on
+# device», DevHub stod i recovery, og projects deploy fejlede.
+#
+# Denne workflow MÅLER kun — den rydder ingenting op. Oprydning hører til
+# deployet (S-362, S-480, S-1290), hvor beslutningerne om hvad der må fjernes
+# er truffet og prøvet. En vagt, der også ryddede, ville skjule netop dét,
+# den findes for at vise.
+#
+# Den måler det samme som deployets «Disk FØR/EFTER»: forbruget på / og
+# Docker-roden (`df`), `docker system df` (images, containere, volumes,
+# byggecache), `journalctl --disk-usage` og de største poster i
+# /var/backups. Selve målekroppen står mellem markørerne `MÅLEKROP START` og
+# `MÅLEKROP SLUT` og er ORD FOR ORD den samme som i deploy-app.yml's
+# diskvagt — scripts/test-deploy-diskvagt-daglig.sh fælder enhver forskel.
+# (En genbrugsworkflow kan ikke læse en scriptfil fra AI-tools: runneren har
+# kun kalderens checkout. Derfor samme form som backup-kroppen i
+# backup-db.yml — to kopier og én test.)
+#
+# Melding — tærsklerne er STRENGT større end, som i deployet:
+#   * over `warn_percent` (85)  → `::warning::`, kørslen er stadig grøn.
+#   * over `fail_percent` (90)  → `::error::` og exit 1. Kørslen bliver RØD,
+#     så GitHub sender mail, og hestevagten ser den i Actions.
+#   * kan målingen ikke læses   → rød. Fejler LUKKET, som deployets vagt: et
+#     manglende tal er "vi ved det ikke", ikke "alt er fint".
+# Tallene står i kørslens summary ($GITHUB_STEP_SUMMARY).
+#
+# Secrets kommer via `secrets: inherit` og er de samme som deploy-app.yml's:
+# SSH_PRIVATE_KEY, TAILSCALE_CI_AUTH_KEY og host-secrettet for miljøet
+# (navnet kan re-mappes pr. app, præcis som i deployet).
+#
+# BEMÆRK: en schedule i den KALDENDE workflow kører kun fra default-branchen.
+# Og slå den ALDRIG fra i Actions-fanen for at dæmpe en rød vagt — luk årsagen.
+
+name: Diskvagt
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'dev | staging | production'
+        required: true
+        type: string
+      warn_percent:
+        description: 'Advar (gul), når disken er over denne procent'
+        required: false
+        type: number
+        default: 85
+      fail_percent:
+        description: 'Fejl (rød, exit 1), når disken er over denne procent'
+        required: false
+        type: number
+        default: 90
+      tailscale:
+        description: 'always | dev-only | never — hvornår runneren skal på tailnettet'
+        required: false
+        type: string
+        default: 'always'
+      dev_host_secret:
+        description: 'Navn på org-secret med dev-boksens host'
+        required: false
+        type: string
+        default: 'INTERNAL_DEV_SSH_HOST'
+      staging_host_secret:
+        required: false
+        type: string
+        default: 'STAGING_SSH_HOST'
+      production_host_secret:
+        required: false
+        type: string
+        default: 'PRODUCTION_SSH_HOST'
+
+jobs:
+  diskvagt:
+    name: Diskvagt (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Jobbet bruger intet token — kun ssh-nøglen.
+    permissions: {}
+    env:
+      DEPLOY_ENV: ${{ inputs.environment }}
+      HOST: ${{ inputs.environment == 'production' && secrets[inputs.production_host_secret] || inputs.environment == 'dev' && secrets[inputs.dev_host_secret] || secrets[inputs.staging_host_secret] }}
+    steps:
+      - name: Kontrollér miljø
+        if: inputs.environment != 'dev' && inputs.environment != 'staging' && inputs.environment != 'production'
+        env:
+          MILJOE: ${{ inputs.environment }}
+        run: |
+          echo "::error title=Ukendt miljø::environment skal være dev, staging eller production — fik '$MILJOE'."
+          exit 1
+
+      - name: Connect to Tailscale
+        if: inputs.tailscale == 'always' || (inputs.tailscale == 'dev-only' && inputs.environment == 'dev')
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          authkey: ${{ secrets.TAILSCALE_CI_AUTH_KEY }}
+
+      # Samme løkke som deploy-app.yml — inklusive `exit 1`, når ruten aldrig
+      # kommer op: en vagt, der ikke kan nå boksen, skal være rød, ikke grøn.
+      - name: Setup SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          for i in $(seq 1 18); do
+            ssh-keyscan -T 5 -H "$HOST" 2>/dev/null | tee -a ~/.ssh/known_hosts | grep -q . && break
+            if [ "$i" -eq 18 ]; then
+              echo "::error title=Ingen rute til $DEPLOY_ENV-boksen::ssh-keyscan nåede aldrig $DEPLOY_ENV-hosten på 18 forsøg (~3 min). Diskvagten kunne derfor ikke måle — se journalctl -u tailscaled på boksen."
+              exit 1
+            fi
+            echo "Attempt $i/18 — waiting for route…"
+            sleep 5
+          done
+
+      # Kroppen er fri for ${{ }}-udtryk med vilje: så kan
+      # scripts/test-deploy-diskvagt-daglig.sh klippe den ud og køre den mod en
+      # falsk ssh, df, docker og journalctl.
+      - name: Mål disken
+        env:
+          WARN_PCT: ${{ inputs.warn_percent }}
+          FAIL_PCT: ${{ inputs.fail_percent }}
+        run: |
+          # Ingen `set -e`: summaryen skal skrives OGSÅ når målingen fejler.
+          set -uo pipefail
+          RAPPORT="${RUNNER_TEMP:-/tmp}/diskvagt-rapport.txt"
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+          for t in "$WARN_PCT" "$FAIL_PCT"; do
+            if ! [[ "$t" =~ ^[0-9]+$ ]]; then
+              echo "::error title=Ugyldig tærskel::warn_percent og fail_percent skal være hele procenter — fik '$t'."
+              exit 1
+            fi
+          done
+
+          # Værdien rejser som en NAVNGIVEN tildeling foran kroppen på stdin,
+          # og ssh-kommandoen er konstant — samme form som deploy-app.yml (se
+          # "Citering ind i en fjern shell" dér). APP_DIR er / her: vagten
+          # gælder BOKSEN, ikke én apps mappe.
+          {
+            printf 'APP_DIR=%q\n' "/"
+            cat << 'REMOTE'
+          set -euo pipefail
+          # ── MÅLEKROP START (S-1290) ──────────────────────────────────────────
+          # ORD FOR ORD ens i deploy-app.yml og diskvagt.yml — rediger aldrig kun
+          # den ene; scripts/test-deploy-diskvagt-daglig.sh fælder enhver forskel.
+          # Kroppen MÅLER kun. Kræver APP_DIR (diskvagt.yml sætter /).
+          #
+          # Docker-roden er dét, et pull fylder op; app-mappen er dét, rsync og
+          # backup fylder op. På dev-boksen er app-mappen et symlink til et
+          # ANDET volume, så de to kan være hver sit filsystem — og ved et
+          # førstedeploy findes mappen slet ikke endnu.
+          DOCKER_ROOT="$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)"
+          [ -n "$DOCKER_ROOT" ] && [ -d "$DOCKER_ROOT" ] || DOCKER_ROOT=/
+          [ -d "$APP_DIR" ] || APP_DIR=/
+
+          # Det HØJESTE forbrug blandt dem — ikke gennemsnittet og ikke roden
+          # alene. Ligger de to på samme filsystem, er svaret bare det samme.
+          maal_pct() {
+            hoejest=0
+            for sti in "$DOCKER_ROOT" "$APP_DIR"; do
+              p="$(df -P "$sti" | awk 'NR==2 {gsub(/%/,"",$5); print $5}')"
+              if [ -n "$p" ] && [ "$p" -gt "$hoejest" ]; then hoejest="$p"; fi
+            done
+            echo "$hoejest"
+          }
+
+          # `sort -u` på selve linjen: er begge stier på samme filsystem, skal
+          # rapporten ikke sige det samme to gange.
+          vis_df() {
+            { for sti in "$DOCKER_ROOT" "$APP_DIR"; do
+                df -hP "$sti" | awk 'NR==2 {printf "  %-14s %5s brugt   %6s fri   (%s)\n", $6, $5, $4, $1}'
+              done; } | sort -u
+          }
+
+          # HVAD der fylder (S-1290). 09-10-2026 sagde vagten kun "99 % → 92 %",
+          # og årsagen — 2,0 GB journald — stod ingen steder i loggen. Hver
+          # måling er tålsom (`|| true`): en post, der ikke kan måles, skal
+          # skrive "kunne ikke måles", ikke vælte målingen af procenten.
+          vis_poster() {
+            j="$(journalctl --disk-usage 2>/dev/null | sed -nE 's/.* take up ([^ ]+) .*/\1/p' | head -n 1 || true)"
+            printf '  %-26s %s\n' "journald" "${j:-(kunne ikke måles)}"
+            docker system df --format '{{.Type}}|{{.Size}}|{{.Reclaimable}}' 2>/dev/null \
+              | awk -F'|' '{printf "  %-26s %s   (kan frigøres: %s)\n", "docker " tolower($1), $2, $3}' || true
+            du -sh /var/backups/* 2>/dev/null | sort -rh | head -n 5 \
+              | awk '{printf "  %-26s %s\n", $2, $1}' || true
+          }
+          # ── MÅLEKROP SLUT ────────────────────────────────────────────────────
+
+          PCT="$(maal_pct)"
+          echo "── Disk"
+          vis_df
+          echo "── Hvad der fylder"
+          vis_poster
+          echo "##DISK_PCT=${PCT}"
+          REMOTE
+          } | ssh -i ~/.ssh/deploy_key \
+                -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+                "root@${HOST}" bash -s | tee "$RAPPORT"
+          SSH_RC=$?
+
+          PCT="$(sed -n 's/^##DISK_PCT=//p' "$RAPPORT" | tail -n 1)"
+
+          if ! [[ "$PCT" =~ ^[0-9]+$ ]]; then
+            STATUS="KUNNE IKKE MÅLE"
+            RC=1
+            echo "::error title=Diskvagten kunne ikke måle ${DEPLOY_ENV}-boksen::Intet brugbart diskforbrug retur (ssh exit ${SSH_RC}). Vagten fejler LUKKET — se trinnets log for, hvad boksen svarede."
+          elif [ "$PCT" -gt "$FAIL_PCT" ]; then
+            STATUS="RØD — over ${FAIL_PCT} %"
+            RC=1
+            echo "::error title=Disken på ${DEPLOY_ENV}-boksen er næsten fuld (${PCT} %)::Over ${FAIL_PCT} %. Næste deploy, backup eller image-pull kan fylde den helt — det var dét, der væltede den interne prod-boks 09-10-2026 (S-1290). Se kørslens summary for, hvad der fylder."
+          elif [ "$PCT" -gt "$WARN_PCT" ]; then
+            STATUS="ADVARSEL — over ${WARN_PCT} %"
+            RC=0
+            echo "::warning title=Disken på ${DEPLOY_ENV}-boksen fylder (${PCT} %)::Over ${WARN_PCT} %. Se kørslens summary for, hvad der fylder."
+          else
+            STATUS="OK"
+            RC=0
+            echo "Diskforbrug på ${DEPLOY_ENV}: ${PCT} % — under ${WARN_PCT} %."
+          fi
+
+          {
+            echo "## Diskvagt — ${DEPLOY_ENV}: ${PCT:-?} % (${STATUS})"
+            echo
+            echo "Gul over ${WARN_PCT} %, rød over ${FAIL_PCT} %. Vagten måler kun; oprydning sker ved deploy."
+            echo
+            echo '```text'
+            grep -v '^##' "$RAPPORT" || echo "(boksen svarede ingenting)"
+            echo '```'
+          } >> "$SUMMARY"
+
+          exit "$RC"

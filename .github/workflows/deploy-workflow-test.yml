@@ -23,6 +23,12 @@ on:
       - 'scripts/test-deploy-diskvagt-byggecache.sh'
       - 'scripts/test-deploy-diskvagt-fladning.sh'
       - 'scripts/test-deploy-ref-vagt.sh'
+      # S-1290: den daglige diskvagt deler målekrop med deploy-app.yml, og
+      # testen kræver, at de to kroppe er identiske — samme grund som
+      # backup-db.yml ovenfor.
+      - '.github/workflows/diskvagt.yml'
+      - 'scripts/test-deploy-diskvagt-journald.sh'
+      - 'scripts/test-deploy-diskvagt-daglig.sh'
 
 jobs:
   backup-step:
@@ -35,6 +41,7 @@ jobs:
         run: |
           python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/deploy-app.yml'))"
           python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/backup-db.yml'))"
+          python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/diskvagt.yml'))"
 
       - name: Test backup-trinnet
         run: bash scripts/test-deploy-backup.sh
@@ -65,6 +72,22 @@ jobs:
       # begge, så det er argumentet og ikke miljøet, der er målt.
       - name: Test diskvagtens vej ind i den fjerne shell
         run: bash scripts/test-deploy-diskvagt-fladning.sh
+
+      # S-1290: 09-10-2026 løb den interne prod-boks fuld af 2,0 GB
+      # journald-journaler, som diskvagten hverken målte eller ryddede.
+      # Testen kører trinnet `journald får et loft` mod en falsk ssh,
+      # systemctl og journalctl og måler, at det er idempotent (anden kørsel
+      # gør INTET), at en fejl er en advarsel og aldrig et fældet deploy, at
+      # trinnet ligger før diskvagten, og at «Disk FØR/EFTER» viser journald
+      # og de største poster.
+      - name: Test journald-loftet og diskvagtens journald-måling
+        run: bash scripts/test-deploy-diskvagt-journald.sh
+
+      # S-1290: den daglige diskvagt (diskvagt.yml). Målekroppen skal være ORD
+      # FOR ORD den samme som deployets, vagten må kun måle, og tærsklerne er
+      # strengt større end: over 85 % gul, over 90 % rød (exit 1).
+      - name: Test den daglige diskvagt
+        run: bash scripts/test-deploy-diskvagt-daglig.sh
 
   diskvagt-byggecache:
     name: Byggecache-oprydningen i diskvagten
