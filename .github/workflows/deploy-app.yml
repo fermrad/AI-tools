@@ -528,7 +528,7 @@ on:
         default: true
 
 jobs:
-  # ── Ref-vagten (project S-452) ────────────────────────────────────────────
+  # ── Ref-vagten (project S-452) og prod-porten (S-547) ─────────────────────
   #
   # Fælder en FORKORTET commit-SHA i `checkout_ref`, før `actions/checkout`
   # når at gætte forkert på den.
@@ -567,29 +567,154 @@ jobs:
   # det én gang — og fælder som en NAVNGIVEN rød boble, hvilket er hele
   # pointen i et punkt om en ulæselig fejl.
   #
+  # ── PRODUCTION: kun en fuld SHA, som origin har (S-547) ───────────────────
+  #
+  # Til `environment == production` er vagten en PORT og ikke kun en fælde for
+  # forkortelser. Den kræver to ting, i denne rækkefølge:
+  #
+  #   1. FORMEN — præcis 40 tegn `[0-9a-f]`. `main`, `feat/x`, `refs/heads/…`,
+  #      tags, forkortelser, store bogstaver og tom streng afvises.
+  #   2. ORIGIN — `gh api repos/<kalderens repo>/commits/<sha>` skal svare 200
+  #      med SAMME SHA tilbage. Spurgt med workflowets eget `GITHUB_TOKEN`.
+  #
+  # Reglen kom fra project (S-403: jobbet `prod_ref_port`, der kalder
+  # `scripts/prod-ref-port.mjs`). Den kunne kun bo i project, fordi scriptet
+  # importerer fra `scripts/dispatch-sha.mjs`, en fil kun project har — så
+  # area51, crm og devhub havde stadig `main` forudfyldt i prod-dispatchen
+  # uden en port. Her står den i ren shell, kræver INGEN fil i app-repoet og
+  # dækker alle fire apper, når de bumper deres pin.
+  #
+  # Rækkefølgen er bærende: endpointet svarer 200 på `main` og på syv tegn (det
+  # opløser grennavne og forkortelser). Stod origin-tjekket alene, ville porten
+  # godkende netop de to former, reglen udelukker. Derfor formen FØR origin, og
+  # derfor sammenlignes det svar, origin giver, med den SHA, der blev spurgt om.
+  #
+  # Store bogstaver afvises frem for at blive foldet til små: værdien sendes
+  # urørt videre som `checkout_ref` OG `git_ref`, og `/api/health` ville da
+  # rapportere en ref, der ikke er lig den SHA, `git rev-parse HEAD` giver.
+  # Vagten pinner — den retter ikke (samme valg som ved forkortelserne).
+  #
+  # ── Hvad porten med vilje IKKE gør ─────────────────────────────────────────
+  #
+  #  * **Den spørger ikke en klon, om SHA'en er en commit HER.** Målt i project
+  #    24-08-2026: squash-mergede PR-head-SHA'er (PR 1189, 1191, 1193) er
+  #    hverken forfædre til main eller på en levende gren; en frisk klon med
+  #    alle fjerngrene svarer NEJ, mens `gh api …/commits/<sha>` svarer 200, og
+  #    `actions/checkout` henter dem fint. Et klon-tjek ville afvise gyldige
+  #    refs. Derfor API'et og ingen checkout i dette job.
+  #  * **Den rører ikke dev og staging.** Staging dispatches på navngivne
+  #    PR-grene (målt i project: 5 af 9 staging-dispatches 14-08 → 24-08-2026)
+  #    — det er fejlfindingsvejen, og den skal blive ved med at virke. Dér
+  #    gælder kun forkortelses-fælden ovenfor.
+  #  * **Den tømmer ikke app-formularernes default `main`.** Tom ref betyder
+  #    hændelsens egen ref, altså samme udrulning, men uden en læselig værdi,
+  #    og `git_ref` i health bliver tom. Et synligt `main`, der fældes her, er
+  #    bedre end et usynligt, der slipper igennem. Tom ref til production
+  #    fældes derfor også.
+  #  * **Den siger ikke, om SHA'en er på main eller verificeret på staging.**
+  #
+  # Push-udrulninger består uden videre: kalderne sender `github.sha` (fuld,
+  # og findes på origin pr. definition). Det gælder devhub, hvor push til main
+  # går direkte i production.
+  #
+  # Udfald: 422 «No commit found» er et SVAR (commiten findes ikke). Alt andet
+  # — 404 (forkert repo eller token uden `contents: read`), 5xx, timeout — er
+  # «kunne ikke spørge» og fælder med en anden titel. Kun 200 med samme SHA er
+  # en tilladelse. Ikke-svar prøves tre gange, før porten giver op.
+  #
+  # Prøverne: `scripts/test-deploy-ref-vagt.sh` klipper kroppen ud af denne
+  # fil og kører den mod en falsk `gh`.
+  #
   # Job-id'et er `ref_gate` med UNDERSTREG. `needs.ref-gate.result` ville
   # blive læst som et minus af Actions' udtrykslag.
   ref_gate:
     name: Kontrollér ref
     runs-on: ubuntu-latest
+    # Kun til commit-opslaget i production. En genbrugsworkflow kan ikke give
+    # sig selv mere end kaldejobbet har; alle fire kaldere har `contents: read`
+    # (project og area51 eksplicit, crm og devhub via repoets default «read»).
+    permissions:
+      contents: read
     steps:
-      # Værdien læses som `"$REF"` fra `env:` og interpoleres IKKE ind i
+      # Værdierne læses som `"$REF"` osv. fra `env:` og interpoleres IKKE ind i
       # kommandoen. `${{ }}` substitueres af Actions, før shellen ser
       # `run:`-blokken — det er dét, S-411/S-418 kostede huset 20 tomme
       # kørsler at lære, og actionlint-porten på project vogter netop det.
-      - name: En forkortet SHA er ikke en commit for actions/checkout
+      - name: Ref'en skal kunne checkes ud — til production en fuld SHA, som origin har
+        shell: bash
         env:
           REF: ${{ inputs.checkout_ref }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # 7-39 hexcifre og intet andet. 40 er den gyldige form og slipper
-          # forbi; alt med en skråstreg (`refs/heads/...`) gør det også, og
-          # dét er med vilje — se den falske positiv nedenfor.
-          if printf '%s' "$REF" | grep -qE '^[0-9a-fA-F]{7,39}$'; then
-            echo "::error title=Forkortet SHA i ref::'$REF' ligner en forkortet commit-SHA, og actions/checkout kan ikke checke sådan en ud. Alt kortere end 40 tegn slås op som et GRENNAVN (refs/heads/$REF) og fejler efter tre forsøg med 'The process /usr/bin/git failed with exit code 1' — en fejl, der ikke nævner refs med et ord. Brug den FULDE 40-tegns SHA: git rev-parse $REF, eller gh api repos/OWNER/REPO/commits/$REF -q .sha. Er '$REF' derimod et rigtigt grennavn eller tag, så skriv det ud som refs/heads/$REF eller refs/tags/$REF — begge slipper forbi denne vagt og er samtidig dét, der gør det entydigt for git."
+          # Workflow-kommandoer er ÉN linje; en nylinje i værdien ville afslutte
+          # ::error midt i beskeden.
+          VIS="${REF//$'\n'/ }"
+
+          if [ "$ENVIRONMENT" != "production" ]; then
+            # dev/staging (S-452): kun forkortelses-fælden. 7-39 hexcifre og
+            # intet andet. 40 er den gyldige form og slipper forbi; alt med en
+            # skråstreg (`refs/heads/...`) gør det også, og dét er med vilje —
+            # et grennavn på 7-39 hexcifre fældes som en FORVENTET falsk
+            # positiv; udvejen er refs/heads/<navn> (prøven står i
+            # scripts/test-deploy-ref-vagt.sh).
+            if printf '%s' "$REF" | grep -qE '^[0-9a-fA-F]{7,39}$'; then
+              echo "::error title=Forkortet SHA i ref::'$VIS' ligner en forkortet commit-SHA, og actions/checkout kan ikke checke sådan en ud. Alt kortere end 40 tegn slås op som et GRENNAVN (refs/heads/$VIS) og fejler efter tre forsøg med 'The process /usr/bin/git failed with exit code 1' — en fejl, der ikke nævner refs med et ord. Brug den FULDE 40-tegns SHA: git rev-parse $VIS, eller gh api repos/$REPO/commits/$VIS -q .sha. Er '$VIS' derimod et rigtigt grennavn eller tag, så skriv det ud som refs/heads/$VIS eller refs/tags/$VIS — begge slipper forbi denne vagt og er samtidig dét, der gør det entydigt for git."
+              exit 1
+            fi
+            echo "ref '$VIS' er ikke en forkortet SHA — videre ($ENVIRONMENT)."
+            exit 0
+          fi
+
+          # ── production, trin 1: formen ────────────────────────────────────
+          LAES="Læs den fulde SHA frem for at skrive den: git rev-parse <ref> efter git fetch, eller gh api repos/$REPO/commits/<ref> -q .sha."
+          if ! [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+            if [ -z "$REF" ]; then
+              GRUND="ref'en er TOM. Tom ref checker hændelsens egen gren ud (typisk main) uden en værdi, nogen kan læse bagefter, og /api/health mister sin git_ref."
+            elif [[ "$REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              GRUND="'$VIS' har store bogstaver. Git skriver SHA'er med små, og health rapporterer git rev-parse HEAD — skriv den med små bogstaver."
+            elif [[ "$REF" =~ ^[0-9a-fA-F]{7,39}$ ]]; then
+              GRUND="'$VIS' er ${#REF} tegn — en forkortet SHA. actions/checkout slår den op som et grennavn, og en forkortelse er tvetydig."
+            else
+              GRUND="'$VIS' er et grennavn, et tag eller en anden ref, ikke en commit-SHA. En gren flytter sig: 'main' deployer, hvad main tilfældigvis var i det sekund, runneren checkede ud."
+            fi
+            echo "::error title=Production tager kun en fuld commit-SHA::$GRUND En udrulning til production skal pinnes til en fuld 40-tegns commit-SHA (små bogstaver). $LAES Dev og staging tager fortsat grene og tags."
             exit 1
           fi
-          echo "ref '$REF' er ikke en forkortet SHA — videre."
+
+          # ── production, trin 2: findes den på origin ──────────────────────
+          # stderr holdes ude af svaret: en advarsel fra gh på stderr må ikke
+          # kunne gøre et ja til «en anden SHA».
+          FUNDET=""
+          SIDSTE=""
+          GH_FEJL="$(mktemp)"
+          for FORSOEG in 1 2 3; do
+            if SVAR="$(gh api "repos/$REPO/commits/$REF" --jq .sha 2>"$GH_FEJL")"; then
+              FUNDET="$SVAR"
+              break
+            fi
+            SVAR="$SVAR $(cat "$GH_FEJL")"
+            case "$SVAR" in
+              *"HTTP 422"*|*"No commit found"*)
+                echo "::error title=SHA'en findes ikke på origin::$REF findes ikke som commit på $REPO (GitHub svarede 422 «No commit found»). Fyrre hextegn SER aflæst ud, men en skrevet eller halvt kopieret SHA kan have rigtige første tegn og forkerte sidste. $LAES"
+                exit 1
+                ;;
+            esac
+            SIDSTE="${SVAR//$'\n'/ }"
+            if [ "$FORSOEG" -lt 3 ]; then sleep "${REF_GATE_PAUSE:-5}"; fi
+          done
+
+          if [ -z "$FUNDET" ]; then
+            echo "::error title=Kunne ikke bekræfte prod-ref::Kunne ikke spørge GitHub, om $REF findes på $REPO (tre forsøg). Sidste svar: $SIDSTE. Det er IKKE et nej om SHA'en: 404 betyder typisk, at kaldejobbet ikke giver GITHUB_TOKEN 'contents: read'; 5xx eller timeout er GitHub selv. Genkør jobbet; production rulles ikke ud uden et ja."
+            exit 1
+          fi
+          if [ "$FUNDET" != "$REF" ]; then
+            echo "::error title=Origin svarede med en anden SHA::Opslaget efter $REF på $REPO gav ${FUNDET//$'\n'/ } tilbage. Endpointet opløser også grennavne og forkortelser — det, der blev fundet, er ikke det, der blev spurgt om."
+            exit 1
+          fi
+          echo "prod-ref $REF findes som commit på $REPO — videre."
 
   # ── Byg og push af imaget — kører KUN på runneren (S-354 punkt 1) ──────────
   #
