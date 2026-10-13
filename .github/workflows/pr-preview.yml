@@ -156,9 +156,7 @@ jobs:
               ``,
               `**${app}** is live at: ${url}`,
               ``,
-              `This preview was deployed from PR #${{ inputs.pr_number }} and will be torn down automatically when the PR is merged or closed.`,
-              ``,
-              `To tear it down manually: re-run the [cleanup workflow](../actions/workflows/pr-preview-cleanup.yml).`,
+              `This preview was deployed from PR #${{ inputs.pr_number }}. There is no automated teardown — remove the container and Nginx block manually on the dev server when you're done.`,
             ].join('\n');
 
             // Delete previous preview comments

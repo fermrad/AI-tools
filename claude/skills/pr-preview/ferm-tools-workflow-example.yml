@@ -1,6 +1,14 @@
 # Copy this file to fermrad/ferm-tools/.github/workflows/pr-preview.yml
 # It wires the ferm-tools repo into the reusable preview workflow in AI-tools.
 #
+# ferm-tools was the old monorepo (apps crm, komm, risk) that this preview
+# flow was built for. There is no shared cleanup workflow in AI-tools (S-737
+# removed pr-preview-cleanup.yml — 0 of its runs were ever used across devhub,
+# crm, and area51, and nothing called it here either). Today, PR-stack
+# previews only exist in fermrad/project, built and maintained there — this
+# example is kept only in case a future repo needs a deploy-only preview with
+# no automated teardown.
+#
 # Required GitHub secrets in ferm-tools:
 #   DEV_SSH_HOST  — IP of the ferm-development Hetzner server
 #   DEV_SSH_KEY   — private SSH key for root@<DEV_SSH_HOST>
@@ -20,30 +28,6 @@ on:
 jobs:
   preview:
     uses: fermrad/AI-tools/.github/workflows/pr-preview.yml@main
-    with:
-      pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
-    secrets:
-      DEV_SSH_HOST: ${{ secrets.DEV_SSH_HOST }}
-      DEV_SSH_KEY: ${{ secrets.DEV_SSH_KEY }}
-
----
-# Copy this file to fermrad/ferm-tools/.github/workflows/pr-preview-cleanup.yml
-
-name: PR Preview Cleanup
-
-on:
-  pull_request:
-    types: [closed]
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: "PR number to clean up"
-        required: true
-        type: string
-
-jobs:
-  cleanup:
-    uses: fermrad/AI-tools/.github/workflows/pr-preview-cleanup.yml@main
     with:
       pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
     secrets:

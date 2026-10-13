@@ -6,6 +6,13 @@ argument-hint: <pr-number>
 
 # PR Preview Deployment
 
+> **Previews today only run in `fermrad/project`**, built and maintained there with
+> its own `deploy-pr-stack.yml`/`teardown-pr-stack.yml`. The workflow and example
+> below are the older ferm-tools-monorepo (crm, komm, risk) mechanism — measured
+> 06-09-2026 at 0 real runs across devhub, crm, and area51, so AI-tools no longer
+> ships a shared cleanup workflow for it (S-737 removed `pr-preview-cleanup.yml`).
+> Don't assume this is live shared infrastructure for other repos.
+
 Deploys a pull request to the `ferm-development` Hetzner server so the UI can be tested live before merging.
 
 ## Prerequisites
@@ -75,16 +82,13 @@ See `.github/workflows/pr-preview.yml` in the repo. The workflow:
 3. Pulls the branch, builds the Docker image for the changed app
 4. Starts the container on a PR-specific port mapped to a subdomain (`pr-<N>.dev.ferm.dk`)
 5. Posts a GitHub comment on the PR with the URL
-6. The preview is torn down automatically when the PR is merged or closed (via a separate `cleanup-preview.yml` workflow)
+
+There is no automated teardown. See **Cleanup** below.
 
 ---
 
 ## Cleanup
 
-Previews are cleaned up automatically. To tear one down manually:
-
-```bash
-gh workflow run cleanup-preview.yml \
-  --repo $REPO \
-  --field pr_number=<number>
-```
+There is no cleanup workflow — AI-tools's `pr-preview-cleanup.yml` was removed
+(S-737; it was never called by any repo). To tear a preview down, SSH into the
+dev server and remove the container and Nginx block for that PR by hand.
