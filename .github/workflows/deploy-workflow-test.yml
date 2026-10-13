@@ -23,6 +23,7 @@ on:
       - 'scripts/test-deploy-diskvagt-byggecache.sh'
       - 'scripts/test-deploy-diskvagt-fladning.sh'
       - 'scripts/test-deploy-ref-vagt.sh'
+      - 'scripts/test-deploy-byggecache-mode.sh'
       # S-1290: den daglige diskvagt deler målekrop med deploy-app.yml, og
       # testen kræver, at de to kroppe er identiske — samme grund som
       # backup-db.yml ovenfor.
@@ -66,6 +67,16 @@ jobs:
       # staging aldrig spørger gh.
       - name: Test ref-vagten
         run: bash scripts/test-deploy-ref-vagt.sh
+
+      # S-1359: `cache_mode`-inputtets default skal være 'min' (ikke det
+      # tidligere hårdkodede 'max'), production skal stadig få en tom
+      # `cache-to`, og de tre trin, der genskaber Next's BuildKit-cache-mount
+      # (actions/cache + buildkit-cache-dance), skal ALLE være gated mod
+      # `environment == 'production'` — `--no-cache` dækker kun lag-cachen,
+      # ikke et cache-mount. Testen parser YAML'en statisk; den kører intet
+      # docker-byg.
+      - name: Test byggecache-mode og Next's cache-mount-gating
+        run: bash scripts/test-deploy-byggecache-mode.sh
 
       # S-447: diskvagtens værdier rejste som POSITIONSARGUMENTER over ssh, og
       # `IMAGE_REPO` er tom pr. konstruktion for hver on-host-app. Det tomme

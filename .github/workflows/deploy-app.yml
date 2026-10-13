@@ -86,6 +86,61 @@
 # som en del af sit `up`. Kombinationen afvises i et eget trin frem for at
 # bygge på serveren i tavshed.
 #
+# ── Byggecache: mode og Next's egen cache (S-1359) ──────────────────────────
+#
+# Målt 13-10-2026 i projects staging-byg («deploy (staging) / build»):
+#
+#   trin                                               | tid
+#   npm run build (Next)                                | 225 s
+#   «exporting to GitHub Actions Cache»                 | 187 s
+#   «exporting layers» + push                           | 49 s
+#   npm ci (kørte fra bunden — ikke CACHED)              | 25 s
+#
+# `cache-to` har hidtil altid været hårdkodet `mode=max`: HVERT mellemlag
+# eksporteres, også BUILDER-laget med node_modules og .next, som skifter ved
+# hver commit. GitHubs cache er 10 GB pr. repo, og de store, flygtige lag
+# skubber det ene lag, der faktisk KAN genbruges — deps — ud af cachen igen.
+# Exporten alene stod for 187 af byggets ca. 280 sekunder, mere end selve
+# `npm run build`.
+#
+# `cache_mode` (min|max) gør det til et input, og DEFAULT ER MIN: kun det
+# ENDELIGE lag eksporteres. En app, der ikke sætter inputtet, får altså min —
+# det er en adfærdsændring for enhver app på denne pin, men den retter netop
+# den regning, målingen ovenfor beskriver, og `max` er stadig tilgængeligt for
+# en app, der har brug for det.
+#
+# `cache_mounts` er en ANDEN cache end `cache-to`/`cache-from`: BuildKits
+# `RUN --mount=type=cache,target=…` i selve Dockerfilen (fx Next's egen
+# `.next/cache`) lever UDENFOR lag-cachen og overlever derfor ikke en hostet
+# runner af sig selv — hver runner er en frisk maskine, og mount'et er tomt
+# ved næste byg, uanset hvad `cache-to`/`cache-from` gør.
+#
+# Sat til et JSON cache-map (reproducible-containers/buildkit-cache-dance's
+# format, `{"<mappe>": "<mount-target-i-bygget>"}`), gemmer og genskaber
+# `actions/cache` + buildkit-cache-dance akkurat de mounts mellem kørsler.
+# Mapperne lægges under `/tmp/ferm-cache-mounts/<nøgle>` — UDENFOR Docker-
+# byggekonteksten (`inputs.sync_path`) — så en nøgle som `next-cache` aldrig
+# lander inde i det, der sendes til `docker build`, uanset appens
+# `sync_path` (project har `.`, crm har `app/`). Tom streng (default) = ingen
+# mount-cache, og de tre trin, der bruger den, er no-op'er.
+#
+# Nøglen er pr. app OG MILJØ, som `scope` ovenfor bruger til `cache-to`/
+# `cache-from`: samme begrundelse, samme risiko — et fælles scope ville lade
+# to miljøer dele hinandens mount-indhold.
+#
+# PRODUKTION BYGGER RENT gælder OGSÅ denne cache, og det er IKKE det samme
+# tjek som `no-cache` nedenfor: `--no-cache` styrer kun BuildKits LAG-cache.
+# En `RUN --mount=type=cache`-mappe er sin egen lagring, uberørt af
+# `--no-cache` — den ville derfor smugle dev/staging-indhold ind i et
+# «rent» prod-byg, hvis mekanismen ikke selv var gated. Derfor har ALLE tre
+# trin (gendan cache-map, `actions/cache`, buildkit-cache-dance) et eksplicit
+# `inputs.environment != 'production'` i deres `if:` — uanset om appen har
+# sat `cache_mounts`.
+#
+# Prøverne: `scripts/test-deploy-byggecache-mode.sh` fælder en flyttet
+# `cache_mode`-default, en `cache-to` der ikke er tom for production, og en
+# mount-cache, der ikke er gated mod production.
+#
 # ── Diskvagt og oprydning (project S-362) ───────────────────────────────────
 #
 # `registry` købte nedetiden ned og betalte med DISK. Vejen henter et NYT image
@@ -496,6 +551,24 @@ on:
         required: false
         type: string
         default: ''
+      cache_mode:
+        # DEFAULT ER MIN — se "Byggecache: mode og Next's egen cache" øverst
+        # for målingen (S-1359). En app, der ikke sætter inputtet, får altså
+        # min. Kun build_mode: registry bruger inputtet; on-host-byg kender
+        # ikke `cache-to`/`cache-from` og rører det aldrig.
+        description: 'min | max — GitHub Actions-cachens mode for registry-bygget (se "Byggecache" øverst). Default min.'
+        required: false
+        type: string
+        default: 'min'
+      cache_mounts:
+        # Tom streng (default) = ingen mount-cache, og de tre trin, der
+        # bruger inputtet, er no-op'er. Kører ALDRIG for production — se
+        # "PRODUKTION BYGGER RENT" i "Byggecache" øverst. Kun
+        # build_mode: registry.
+        description: 'JSON cache-map (buildkit-cache-dance-format, {"<mappe>": "<mount-target>"}) for BuildKit cache-mounts, fx Next''s .next/cache. Tom = fra.'
+        required: false
+        type: string
+        default: ''
       image_keep:
         # UBRUGTE images, ikke images i alt: alt hvad en container (kørende
         # eller stoppet) hænger på, fredes FØR der tælles. 3 er valgt, fordi en
@@ -870,6 +943,7 @@ jobs:
           fi
 
       - name: Set up Buildx
+        id: buildx
         if: env.IMAGE_EXISTS != 'true'
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
@@ -883,6 +957,49 @@ jobs:
           # udløber med kørslen, så der ligger ingen blivende registry-nøgle
           # nogen steder, og rettighederne kommer fra kaldejobbets `permissions`.
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Next's egen byggecache (S-1359) — se "Byggecache" øverst ──────────
+      # Tre trin, og alle tre bærer den SAMME betingelse: tomt `cache_mounts`
+      # er en no-op, og production rører ALDRIG denne cache, uanset inputtet
+      # — `--no-cache` ovenfor dækker kun lag-cachen, ikke et BuildKit
+      # cache-mount, så gatingen skal stå her og ikke derinde.
+      - name: Gendan cache-map til /tmp (uden for byggekonteksten)
+        id: cache_mounts_map
+        if: env.IMAGE_EXISTS != 'true' && inputs.cache_mounts != '' && inputs.environment != 'production'
+        env:
+          CACHE_MOUNTS: ${{ inputs.cache_mounts }}
+        run: |
+          set -euo pipefail
+          # Nøglerne i inputtets cache-map flyttes til /tmp/ferm-cache-mounts/<nøgle>,
+          # så de aldrig lander inde i det, der sendes til `docker build` —
+          # uanset appens sync_path. Værdierne (mount-targets i bygget) rører
+          # vi ikke, uanset om de er en streng eller et objekt med id/sharing.
+          MAP="$(echo "$CACHE_MOUNTS" | jq -c '
+            to_entries | map({key: ("/tmp/ferm-cache-mounts/" + .key), value: .value}) | from_entries
+          ')"
+          echo "map=$MAP" >> "$GITHUB_OUTPUT"
+
+      - name: Cache byggecache-mounts
+        id: cache_mounts
+        if: env.IMAGE_EXISTS != 'true' && inputs.cache_mounts != '' && inputs.environment != 'production'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: /tmp/ferm-cache-mounts
+          # Pr. app OG MILJØ, som `scope` ved cache-to/cache-from — se
+          # "Byggecache" øverst. restore-keys falder tilbage til senest
+          # gemte for samme app+miljø, så cachen stadig varmer, selv om SHA'en
+          # i key aldrig matcher et tidligere forsøg.
+          key: byggecache-mount-${{ inputs.app_slug }}-${{ inputs.environment }}-${{ env.GIT_SHA }}
+          restore-keys: |
+            byggecache-mount-${{ inputs.app_slug }}-${{ inputs.environment }}-
+
+      - name: Injicér byggecache-mounts i bygget
+        if: env.IMAGE_EXISTS != 'true' && inputs.cache_mounts != '' && inputs.environment != 'production'
+        uses: reproducible-containers/buildkit-cache-dance@5422eac04292c961a382e0f584ea0f03ad9da723 # v3.4.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          cache-map: ${{ steps.cache_mounts_map.outputs.map }}
+          skip-extraction: ${{ steps.cache_mounts.outputs.cache-hit }}
 
       - name: Build and push image
         id: push
@@ -912,17 +1029,23 @@ jobs:
           #
           # Uden den ville prod-imaget kunne samles af lag, en dev- eller
           # staging-kørsel har lagt i cachen: `Deploy project` kan dispatches med
-          # `environment: dev` og en VILKÅRLIG ref, og med `mode=max` eksporteres
-          # hvert mellemlag. Den næste prod-udrulning ville så restore dem — en
-          # rute fra en uskyldigt udseende dev-dispatch ind i prod-imaget, hvor
-          # selve prod-kørslen ser helt normal ud.
+          # `environment: dev` og en VILKÅRLIG ref, og cache-to eksporterer
+          # mellemlag for netop dét miljø. Den næste prod-udrulning ville så
+          # restore dem — en rute fra en uskyldigt udseende dev-dispatch ind i
+          # prod-imaget, hvor selve prod-kørslen ser helt normal ud.
           no-cache: ${{ inputs.environment == 'production' }}
           pull: ${{ inputs.environment == 'production' }}
           # Og cachen er pr. app OG MILJØ. Et fælles scope ville lade de to
           # miljøer skrive i hinandens cache — samme rute som ovenfor, bare uden
           # at nogen behøvede at dispatche noget.
+          #
+          # mode er `cache_mode` (default min, se "Byggecache" øverst) — IKKE
+          # hårdkodet `max` længere. `mode=max` eksporterer hvert mellemlag,
+          # også det flygtige builder-lag; `mode=min` eksporterer kun det
+          # endelige, og det er det, to byg af samme Dockerfile rent faktisk
+          # genbruger.
           cache-from: type=gha,scope=${{ inputs.app_slug }}-${{ inputs.environment }}
-          cache-to: ${{ inputs.environment == 'production' && '' || format('type=gha,mode=max,scope={0}-{1}', inputs.app_slug, inputs.environment) }}
+          cache-to: ${{ inputs.environment == 'production' && '' || format('type=gha,mode={0},scope={1}-{2}', inputs.cache_mode, inputs.app_slug, inputs.environment) }}
 
       # Et fejlet registry-byg har ÉN kendt årsag, der ikke ligner sig selv i
       # loggen: bygget havde brug for en hemmelighed, og registry-vejen sender
