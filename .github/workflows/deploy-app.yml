@@ -118,11 +118,19 @@
 # Sat til et JSON cache-map (reproducible-containers/buildkit-cache-dance's
 # format, `{"<mappe>": "<mount-target-i-bygget>"}`), gemmer og genskaber
 # `actions/cache` + buildkit-cache-dance akkurat de mounts mellem kørsler.
-# Mapperne lægges under `/tmp/ferm-cache-mounts/<nøgle>` — UDENFOR Docker-
+# Mapperne lægges under `$RUNNER_TEMP/ferm-cache-mounts/<nøgle>` — UDENFOR Docker-
 # byggekonteksten (`inputs.sync_path`) — så en nøgle som `next-cache` aldrig
 # lander inde i det, der sendes til `docker build`, uanset appens
 # `sync_path` (project har `.`, crm har `app/`). Tom streng (default) = ingen
 # mount-cache, og de tre trin, der bruger den, er no-op'er.
+#
+# ⚠️ IKKE /tmp (20-10-2026): buildkit-cache-dance's post-trin OMDØBER sin
+# scratch-mappe i arbejdsmappen til cache-mappen. På GitHubs runnere ligger
+# /tmp på en anden disk end arbejdsmappen, så omdøbningen fejlede med «EXDEV:
+# cross-device link not permitted», og jobbet gik rødt, selv om bygget var
+# lykkedes (project's staging, 20-10 07:41). `runner.temp`
+# (/home/runner/work/_temp) ligger på samme disk og stadig uden for
+# byggekonteksten.
 #
 # Nøglen er pr. app OG MILJØ, som `scope` ovenfor bruger til `cache-to`/
 # `cache-from`: samme begrundelse, samme risiko — et fælles scope ville lade
@@ -963,19 +971,19 @@ jobs:
       # er en no-op, og production rører ALDRIG denne cache, uanset inputtet
       # — `--no-cache` ovenfor dækker kun lag-cachen, ikke et BuildKit
       # cache-mount, så gatingen skal stå her og ikke derinde.
-      - name: Gendan cache-map til /tmp (uden for byggekonteksten)
+      - name: Gendan cache-map til runner.temp (uden for byggekonteksten, samme disk)
         id: cache_mounts_map
         if: env.IMAGE_EXISTS != 'true' && inputs.cache_mounts != '' && inputs.environment != 'production'
         env:
           CACHE_MOUNTS: ${{ inputs.cache_mounts }}
         run: |
           set -euo pipefail
-          # Nøglerne i inputtets cache-map flyttes til /tmp/ferm-cache-mounts/<nøgle>,
+          # Nøglerne i inputtets cache-map flyttes til $RUNNER_TEMP/ferm-cache-mounts/<nøgle>,
           # så de aldrig lander inde i det, der sendes til `docker build` —
           # uanset appens sync_path. Værdierne (mount-targets i bygget) rører
           # vi ikke, uanset om de er en streng eller et objekt med id/sharing.
-          MAP="$(echo "$CACHE_MOUNTS" | jq -c '
-            to_entries | map({key: ("/tmp/ferm-cache-mounts/" + .key), value: .value}) | from_entries
+          MAP="$(echo "$CACHE_MOUNTS" | jq -c --arg d "$RUNNER_TEMP/ferm-cache-mounts/" '
+            to_entries | map({key: ($d + .key), value: .value}) | from_entries
           ')"
           echo "map=$MAP" >> "$GITHUB_OUTPUT"
 
@@ -984,7 +992,7 @@ jobs:
         if: env.IMAGE_EXISTS != 'true' && inputs.cache_mounts != '' && inputs.environment != 'production'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: /tmp/ferm-cache-mounts
+          path: ${{ runner.temp }}/ferm-cache-mounts
           # Pr. app OG MILJØ, som `scope` ved cache-to/cache-from — se
           # "Byggecache" øverst. restore-keys falder tilbage til senest
           # gemte for samme app+miljø, så cachen stadig varmer, selv om SHA'en
