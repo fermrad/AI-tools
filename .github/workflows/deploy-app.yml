@@ -1072,6 +1072,13 @@ jobs:
     # deploy-jobbet køre videre, selv om ref-vagten netop havde fældet — og
     # vagten ville være pynt.
     if: ${{ !cancelled() && needs.ref_gate.result == 'success' && needs.build.result != 'failure' }}
+    # S-1497 «R-156 BP1»: deploy-jobbet kører i appens GitHub-miljø, så
+    # boks-hemmelighederne kan ligge i miljøet og ikke på repo-niveau. Med
+    # grenreglen «kun main» på `staging`/`production` kan en gren ikke læse
+    # dem, og et påkrævet review på `production` holder et prod-deploy, til
+    # Jakob eller Mads (eller dispatch-løkken for sine egne) godkender.
+    # Findes miljøet ikke i kalder-repoet, opretter GitHub det uden regler.
+    environment: ${{ inputs.environment }}
     runs-on: ubuntu-latest
     # Nedskaleringen (S-354 punkt 1). En genbrugsworkflow kan kun skrue NED,
     # aldrig op: `contents: read` bruges af checkout, `packages: read` er dét,
