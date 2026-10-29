@@ -72,7 +72,7 @@ Læs `CLAUDE.md` i repoet først. Den bærer husets regler, og de gælder.
 
 ## Miljøet på denne maskine
 - Prisma 7 indlæser IKKE `.env`. Før `prisma`-kommandoer: `set -a; . ./.env; set +a`
-- Typecheck: `NODE_OPTIONS=--max-old-space-size=3072 npx tsc --noEmit` (husets BYGGE_LOFT_MB)
+- Typecheck: `npm run typecheck` (husets byggeloft BYGGE_LOFT_MB = 3520, samme som CI). Brug aldrig `git stash` — træet deles, og der ligger fremmede stashes.
 - `npm ci` og `prisma db push` er kørt i dit worktree. Basen er TOM — kør `npm run prisma:seed`, hvis opgaven kræver data. Prøver: `npm test` (~85 s). Byg: `npm run build`.
 
 ## Krav
