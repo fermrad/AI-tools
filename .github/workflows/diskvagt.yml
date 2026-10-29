@@ -80,6 +80,11 @@ on:
 jobs:
   diskvagt:
     name: Diskvagt (${{ inputs.environment }})
+    # S-1497 «R-156 BP1»: samme miljø som deploy-app.yml, så ssh-nøglen kan
+    # ligge i miljøet. Ligger der et påkrævet review på `production`, venter
+    # den planlagte kørsel på godkendelse — dispatch-løkken godkender
+    # planlagte kørsler fra main.
+    environment: ${{ inputs.environment }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Jobbet bruger intet token — kun ssh-nøglen.
