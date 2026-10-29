@@ -119,7 +119,7 @@ proeve(
 
 # --- 5. de tre cache-mounts-trin findes og er gated mod production --------
 wanted_names = [
-    "Gendan cache-map til /tmp (uden for byggekonteksten)",
+    "Gendan cache-map til runner.temp (uden for byggekonteksten, samme disk)",
     "Cache byggecache-mounts",
     "Injicér byggecache-mounts i bygget",
 ]
@@ -162,6 +162,16 @@ proeve(
         for l in raw_lines
     ),
     "fandt ingen 'uses: reproducible-containers/buildkit-cache-dance@<40-hex> # v...'-linje i filen",
+)
+
+# 20-10-2026: buildkit-cache-dance OMDØBER sin scratch-mappe i arbejdsmappen
+# til cache-mappen. Lå cache-mappen under /tmp (en anden disk på GitHubs
+# runnere), fejlede omdøbningen med EXDEV og jobbet gik rødt (project staging).
+proeve(
+    "cache-mounts ligger under runner.temp, ikke /tmp (samme disk som arbejdsmappen — EXDEV 20-10-2026)",
+    "/tmp/ferm-cache-mounts" not in "\n".join(l for l in raw_lines if not l.lstrip().startswith("#"))
+    and any("runner.temp }}/ferm-cache-mounts" in l for l in raw_lines),
+    "cache-mounts-mappen skal være ${{ runner.temp }}/ferm-cache-mounts — /tmp ligger på en anden disk, og cache-dance's omdøbning fejler med EXDEV",
 )
 
 print()
