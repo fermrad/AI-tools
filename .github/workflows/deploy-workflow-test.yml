@@ -30,6 +30,9 @@ on:
       - '.github/workflows/diskvagt.yml'
       - 'scripts/test-deploy-diskvagt-journald.sh'
       - 'scripts/test-deploy-diskvagt-daglig.sh'
+      # S-962: den ugentlige oprydning (oprydning.yml) og dens test.
+      - '.github/workflows/oprydning.yml'
+      - 'scripts/test-deploy-oprydning.sh'
 
 jobs:
   backup-step:
@@ -43,6 +46,7 @@ jobs:
           python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/deploy-app.yml'))"
           python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/backup-db.yml'))"
           python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/diskvagt.yml'))"
+          python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/oprydning.yml'))"
 
       - name: Test backup-trinnet
         run: bash scripts/test-deploy-backup.sh
@@ -104,6 +108,15 @@ jobs:
       # strengt større end: over 85 % gul, over 90 % rød (exit 1).
       - name: Test den daglige diskvagt
         run: bash scripts/test-deploy-diskvagt-daglig.sh
+
+      # S-962: den ugentlige oprydning (oprydning.yml). Kører trinnet mod en
+      # falsk docker med tilstand og måler, at præcis de forventede images
+      # slettes, at intet med en container røres, at tørkørsel ikke ændrer
+      # noget, at den fejler lukket — og at fem bevidst ødelagte udgaver
+      # (kørende/forrige/stoppet slettet, volume-prune, image prune -a)
+      # fældes.
+      - name: Test den ugentlige oprydning
+        run: bash scripts/test-deploy-oprydning.sh
 
   diskvagt-byggecache:
     name: Byggecache-oprydningen i diskvagten

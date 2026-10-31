@@ -1,0 +1,346 @@
+# Ugentlig oprydning af en Ferm-boks — kaldes fra hver apps egen planlagte
+# workflow via `uses: fermrad/AI-tools/.github/workflows/oprydning.yml@<sha>`,
+# ved siden af diskvagt.yml.
+#
+# HVORFOR den findes (S-962): 31-10-2026 var prod-boksen `ferm-server` 89 %
+# fuld. Images fyldte 25,6 GB, hvoraf 10,8 GB kunne frigøres, og byggecachen
+# bar 6,6 GB, alt ubrugt. Synderne var images UDEN container — ældre
+# `ghcr.io/fermrad/devhub:<sha>` og `ghcr.io/fermrad/project:<sha>` samt et
+# lokalt bygget `ferm-devhub-app:latest` — plus byggecachen. I hånden gik
+# disken til 56 %, og ingen container blev rørt. Det skal boksen gøre selv.
+#
+# HVORFOR et SØSTER-workflow og ikke en tilstand i diskvagt.yml: diskvagten
+# MÅLER kun, og det er et bevidst løfte (se dens hoved: «En vagt, der også
+# ryddede, ville skjule netop dét, den findes for at vise»).
+# scripts/test-deploy-diskvagt-daglig.sh fælder enhver `prune` eller
+# `image rm` i diskvagt.yml. En «oprydningstilstand» dér ville enten bryde
+# løftet eller kræve, at testen svækkes. Samme ssh, samme GitHub-miljø og
+# samme Tailscale-nøgle som diskvagten alligevel — trinnene Kontrollér miljø,
+# Connect to Tailscale og Setup SSH er de samme — så prisen er én fil mere,
+# ikke en anden adgangsvej.
+#
+# TRINNENE, i denne rækkefølge (alt på boksen, over ssh):
+#   1. BYGGECACHE — `docker builder prune -af`. Det er dæmon-globalt (S-480),
+#      og det er med vilje her: kl. natten til en søndag ruller ingen ud, og
+#      en uges ubrugt cache er det, 31-10 målte som død vægt. Deployets
+#      `until=`-regel gælder under et deploy, hvor naboens varme cache lever.
+#   2. IMAGES UDEN CONTAINER i `ghcr.io/fermrad/<app>` — pr. repository
+#      bevares tilbagerulningsvejen. Spejler `image_keep` i deploy-app.yml
+#      (fredning fra MASKINEN: `docker ps -aq` → `docker inspect .Image`, så
+#      kørende OG stoppet container fredes før der tælles), men med
+#      image_keep = 1 frem for 3 og med et tilføjet hensyn til rækkefølgen:
+#        * images, en container hænger på → røres aldrig.
+#        * ubrugte images NYERE end det kørende → beholdes. De kan være
+#          pullet af et deploy, der er i gang, eller et mislykket et.
+#        * det nyeste ubrugte ÆLDRE end det kørende → beholdes: «forrige».
+#        * resten af de ubrugte → slettes. Har repoet slet intet image i
+#          brug, beholdes det nyeste ubrugte.
+#      «De N nyeste ubrugte» alene ville beholde et nyere, aldrig kørt image
+#      og slette det egentlige forrige — netop tilbagerulningsvejen.
+#   3. LOKALT BYGGEDE `<navn>:latest` UDEN container — et navn uden registry
+#      og uden RepoDigests (dvs. aldrig hentet). Et hentet `redis:latest`
+#      uden container røres ikke; det er ikke dødvægt fra vores egne byg.
+#   4. Et image med en container — Postgres, Caddy, scrapere … — RØRES ALDRIG,
+#      hverken kørende eller stoppet. Alle andre registre end
+#      `ghcr.io/fermrad/` og alle andre tags end `:latest` lokalt røres heller
+#      ikke.
+#
+# ⛔ Ingen `docker system prune`, ingen `docker volume …`, ingen
+# `docker image prune`. Volumener røres aldrig. Fjernelsen sker med
+# `docker image rm <ref>` UDEN `-f`, så dæmonen selv afviser et image, en
+# container hænger på — også hvis fredningen ovenfor skulle svigte — og loggen
+# kan opregne præcis, hvad der forsvandt.
+#
+# TØRKØRSEL: `toer: true` (DEFAULT) lister kun, hvad der ville blive slettet,
+# og kører kun læsende docker-kommandoer. Default er tør, så et kald, der
+# glemmer inputtet, ikke sletter noget. Den planlagte kørsel skal derfor bede
+# om det eksplicit; manuel dispatch får tør kørsel af sig selv:
+#
+#     toer: ${{ github.event_name != 'schedule' }}
+#
+# FEJLER LUKKET: kan boksens disk ikke måles, eller kan containerlisten ikke
+# læses, slettes der INTET, og kørslen er rød. En tom container-liste regnes
+# som en fejl, ikke som «alt er ubrugt».
+#
+# Summary ($GITHUB_STEP_SUMMARY): disk før og efter, frigjort plads og de
+# slettede images (kun navne og tags).
+#
+# Secrets kommer via `secrets: inherit` og er de samme som diskvagt.yml's:
+# SSH_PRIVATE_KEY, TAILSCALE_CI_AUTH_KEY og host-secrettet for miljøet.
+#
+# BEMÆRK: en schedule i den KALDENDE workflow kører kun fra default-branchen.
+# Appen får workflowet først med en pin-opdatering (laptoppen), ikke ved merge.
+
+name: Ugentlig oprydning
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'dev | staging | production'
+        required: true
+        type: string
+      toer:
+        description: 'Tørkørsel: list kun, hvad der ville blive slettet. Default true.'
+        required: false
+        type: boolean
+        default: true
+      tailscale:
+        description: 'always | dev-only | never — hvornår runneren skal på tailnettet'
+        required: false
+        type: string
+        default: 'always'
+      dev_host_secret:
+        description: 'Navn på org-secret med dev-boksens host'
+        required: false
+        type: string
+        default: 'INTERNAL_DEV_SSH_HOST'
+      staging_host_secret:
+        required: false
+        type: string
+        default: 'STAGING_SSH_HOST'
+      production_host_secret:
+        required: false
+        type: string
+        default: 'PRODUCTION_SSH_HOST'
+
+jobs:
+  oprydning:
+    name: Oprydning (${{ inputs.environment }}${{ inputs.toer && ', tør' || '' }})
+    # Samme miljø som diskvagt.yml og deploy-app.yml, så ssh-nøglen kan ligge i
+    # miljøet. Et påkrævet review på `production` får den planlagte kørsel til
+    # at vente på godkendelse.
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions: {}
+    env:
+      DEPLOY_ENV: ${{ inputs.environment }}
+      HOST: ${{ inputs.environment == 'production' && secrets[inputs.production_host_secret] || inputs.environment == 'dev' && secrets[inputs.dev_host_secret] || secrets[inputs.staging_host_secret] }}
+    steps:
+      - name: Kontrollér miljø
+        if: inputs.environment != 'dev' && inputs.environment != 'staging' && inputs.environment != 'production'
+        env:
+          MILJOE: ${{ inputs.environment }}
+        run: |
+          echo "::error title=Ukendt miljø::environment skal være dev, staging eller production — fik '$MILJOE'."
+          exit 1
+
+      - name: Connect to Tailscale
+        if: inputs.tailscale == 'always' || (inputs.tailscale == 'dev-only' && inputs.environment == 'dev')
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          authkey: ${{ secrets.TAILSCALE_CI_AUTH_KEY }}
+
+      - name: Setup SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          for i in $(seq 1 18); do
+            ssh-keyscan -T 5 -H "$HOST" 2>/dev/null | tee -a ~/.ssh/known_hosts | grep -q . && break
+            if [ "$i" -eq 18 ]; then
+              echo "::error title=Ingen rute til $DEPLOY_ENV-boksen::ssh-keyscan nåede aldrig $DEPLOY_ENV-hosten på 18 forsøg (~3 min). Oprydningen kunne derfor ikke køre — se journalctl -u tailscaled på boksen."
+              exit 1
+            fi
+            echo "Attempt $i/18 — waiting for route…"
+            sleep 5
+          done
+
+      # Kroppen er fri for ${{ }}-udtryk med vilje: så kan
+      # scripts/test-deploy-oprydning.sh klippe den ud og køre den mod en falsk
+      # ssh, df og docker.
+      - name: Ryd op
+        env:
+          TOER: ${{ inputs.toer && '1' || '0' }}
+        run: |
+          # Ingen `set -e`: summaryen skal skrives OGSÅ når oprydningen fejler.
+          set -uo pipefail
+          RAPPORT="${RUNNER_TEMP:-/tmp}/oprydning-rapport.txt"
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+          # Værdien rejser som en NAVNGIVEN tildeling foran kroppen på stdin, og
+          # ssh-kommandoen er konstant — samme form som diskvagt.yml.
+          {
+            printf 'TOER=%q\n' "$TOER"
+            cat << 'REMOTE'
+          set -uo pipefail
+          FEJL=0
+          DOCKER_ROOT="$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)"
+          [ -n "$DOCKER_ROOT" ] && [ -d "$DOCKER_ROOT" ] || DOCKER_ROOT=/
+
+          maal_pct() { df -P "$DOCKER_ROOT" | awk 'NR==2 {gsub(/%/,"",$5); print $5}'; }
+          maal_kb()  { df -P "$DOCKER_ROOT" | awk 'NR==2 {print $3}'; }
+
+          # Uden et læsbart FØR-tal rører vi intet: så kan hverken «frigjort»
+          # eller oprydningen selv vurderes.
+          FOER_PCT="$(maal_pct || true)"
+          FOER_KB="$(maal_kb || true)"
+          if ! [[ "$FOER_PCT" =~ ^[0-9]+$ && "$FOER_KB" =~ ^[0-9]+$ ]]; then
+            echo "Kunne ikke måle disken FØR oprydning — intet er rørt."
+            exit 1
+          fi
+          echo "##FOER_PCT=${FOER_PCT}"
+          echo "##FOER_KB=${FOER_KB}"
+          echo "── Disk FØR oprydning: ${FOER_PCT} % brugt"
+          docker system df --format '{{.Type}}|{{.Size}}|{{.Reclaimable}}' 2>/dev/null \
+            | awk -F'|' '{printf "  %-26s %s   (kan frigøres: %s)\n", "docker " tolower($1), $2, $3}' || true
+
+          slet() {
+            if [ "$TOER" = "1" ]; then
+              echo "  ville slette $1"
+              echo "##VILLE_SLETTE=$1"
+              return
+            fi
+            echo "  sletter      $1"
+            if docker image rm "$1" > /dev/null 2>&1; then
+              echo "##SLETTET=$1"
+            else
+              echo "    (kunne ikke slettes — dæmonen afviste, springes over)"
+              echo "##KUNNE_IKKE=$1"
+            fi
+          }
+
+          # 1) Byggecache.
+          if [ "$TOER" = "1" ]; then
+            echo "── Byggecache: ville køre 'docker builder prune -af'"
+          else
+            echo "── Byggecache: docker builder prune -af"
+            if UD="$(docker builder prune -af 2>&1)"; then
+              printf '%s\n' "$UD" | tail -n 1
+            else
+              printf '%s\n' "$UD" | tail -n 3
+              echo "  (byggecachen kunne ikke ryddes)"
+              FEJL=1
+            fi
+          fi
+
+          # 2+3) Images uden container. Fredningen kommer fra MASKINEN. Fejler
+          #      en af de læsende kommandoer, SLETTES INTET — en tom BRUGT-liste
+          #      ville ellers se ud som «alt er ubrugt».
+          echo "── Images uden container ($([ "$TOER" = "1" ] && echo tør || echo live))"
+          declare -A BRUGT=() HAR_BRUGT=() SET_BRUGT=() FORRIGE=() BEHOLD_ID=()
+          if ! CIDS="$(docker ps -aq)"; then
+            echo "  docker ps svarede ikke — images springes over."; FEJL=1; CIDS=""; IMGOK=0
+          elif [ -z "$CIDS" ]; then
+            echo "  boksen har ingen containere overhovedet — mistænkeligt, images springes over."; FEJL=1; IMGOK=0
+          # shellcheck disable=SC2086
+          elif ! BRUGTE="$(docker inspect -f '{{.Image}}' $CIDS)"; then
+            echo "  docker inspect svarede ikke — images springes over."; FEJL=1; IMGOK=0
+          elif ! LISTE="$(docker images --no-trunc --format '{{.ID}} {{.Repository}}:{{.Tag}}')"; then
+            echo "  docker images svarede ikke — images springes over."; FEJL=1; IMGOK=0
+          else
+            IMGOK=1
+          fi
+
+          if [ "$IMGOK" = "1" ]; then
+            for id in $BRUGTE; do BRUGT[$id]=1; done
+
+            # Første gennemløb: har repoet et image i brug?
+            while read -r ID REF; do
+              [ -n "${ID:-}" ] || continue
+              repo="${REF%:*}"
+              if [[ "$repo" == ghcr.io/fermrad/* && -n "${BRUGT[$ID]:-}" ]]; then HAR_BRUGT[$repo]=1; fi
+            done <<< "$LISTE"
+
+            # Andet gennemløb, nyeste først (docker images' egen rækkefølge).
+            while read -r ID REF; do
+              [ -n "${ID:-}" ] || continue
+              repo="${REF%:*}"; tag="${REF##*:}"
+              if [ "$repo" = "<none>" ] || [ "$tag" = "<none>" ]; then continue; fi
+              if [ -n "${BRUGT[$ID]:-}" ]; then
+                echo "  i brug       $REF"
+                if [[ "$repo" == ghcr.io/fermrad/* ]]; then SET_BRUGT[$repo]=1; fi
+                continue
+              fi
+              if [[ "$repo" == ghcr.io/fermrad/* ]]; then
+                if [ -n "${BEHOLD_ID[$ID]:-}" ]; then
+                  echo "  rollback     $REF"; echo "##BEHOLDT=$REF"; continue
+                fi
+                if [ -n "${HAR_BRUGT[$repo]:-}" ] && [ -z "${SET_BRUGT[$repo]:-}" ]; then
+                  BEHOLD_ID[$ID]=1
+                  echo "  venter       $REF (nyere end det kørende)"; echo "##BEHOLDT=$REF"; continue
+                fi
+                if [ -z "${FORRIGE[$repo]:-}" ]; then
+                  FORRIGE[$repo]=1; BEHOLD_ID[$ID]=1
+                  echo "  rollback     $REF"; echo "##BEHOLDT=$REF"; continue
+                fi
+                slet "$REF"
+              elif [[ "$repo" != */* && "$tag" == "latest" ]]; then
+                # Lokalt bygget = aldrig hentet = ingen RepoDigests. Kan det ikke
+                # læses, regnes imaget som hentet, altså urørt.
+                DIGESTS="$(docker image inspect -f '{{len .RepoDigests}}' "$ID" 2>/dev/null || echo ukendt)"
+                if [ "$DIGESTS" = "0" ] && [ -z "${BEHOLD_ID[$ID]:-}" ]; then
+                  slet "$REF"
+                else
+                  echo "  urørt        $REF"
+                fi
+              else
+                echo "  urørt        $REF"
+              fi
+            done <<< "$LISTE"
+          fi
+
+          EFTER_PCT="$(maal_pct || true)"
+          EFTER_KB="$(maal_kb || true)"
+          echo "##EFTER_PCT=${EFTER_PCT}"
+          echo "##EFTER_KB=${EFTER_KB}"
+          echo "── Disk EFTER oprydning: ${EFTER_PCT:-?} % brugt"
+          exit "$FEJL"
+          REMOTE
+          } | ssh -i ~/.ssh/deploy_key \
+                -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+                "root@${HOST}" bash -s | tee "$RAPPORT"
+          SSH_RC=$?
+
+          FOER_PCT="$(sed -n 's/^##FOER_PCT=//p' "$RAPPORT" | tail -n 1)"
+          FOER_KB="$(sed -n 's/^##FOER_KB=//p' "$RAPPORT" | tail -n 1)"
+          EFTER_PCT="$(sed -n 's/^##EFTER_PCT=//p' "$RAPPORT" | tail -n 1)"
+          EFTER_KB="$(sed -n 's/^##EFTER_KB=//p' "$RAPPORT" | tail -n 1)"
+
+          if [ "$TOER" = "1" ]; then TILSTAND="TØRKØRSEL — intet slettet"; else TILSTAND="LIVE"; fi
+          RC=0
+          if ! [[ "$FOER_KB" =~ ^[0-9]+$ && "$EFTER_KB" =~ ^[0-9]+$ ]]; then
+            RC=1
+            TILSTAND="KUNNE IKKE MÅLE"
+            FRIGJORT="ukendt"
+            echo "::error title=Oprydningen kunne ikke måle ${DEPLOY_ENV}-boksen::Intet brugbart diskforbrug retur (ssh exit ${SSH_RC}). Oprydningen fejler LUKKET — se trinnets log."
+          else
+            FRIGJORT="$(awk -v a="$FOER_KB" -v b="$EFTER_KB" 'BEGIN {d=a-b; if (d<0) d=0; printf "%.1f GB", d/1048576}')"
+            if [ "$SSH_RC" -ne 0 ]; then
+              RC=1
+              echo "::error title=Oprydningen på ${DEPLOY_ENV}-boksen fejlede::En af trinnene svarede ikke (ssh exit ${SSH_RC}) — se trinnets log for, hvilket."
+            fi
+          fi
+          if grep -q '^##KUNNE_IKKE=' "$RAPPORT"; then
+            echo "::warning title=Nogle images kunne ikke slettes på ${DEPLOY_ENV}-boksen::Dæmonen afviste dem; de er listet i summaryen."
+          fi
+
+          liste() { # liste <markør> — navne og tags, ingen andre data
+            sed -n "s/^##$1=//p" "$RAPPORT" | sed 's/^/- `/; s/$/`/'
+          }
+          if [ "$TOER" = "1" ]; then SLETNAVN="VILLE_SLETTE"; SLETTITEL="Ville slette"; else SLETNAVN="SLETTET"; SLETTITEL="Slettede images"; fi
+          {
+            echo "## Ugentlig oprydning — ${DEPLOY_ENV}: ${FOER_PCT:-?} % → ${EFTER_PCT:-?} % (${TILSTAND})"
+            echo
+            echo "Frigjort plads: **${FRIGJORT}**"
+            echo
+            echo "### ${SLETTITEL} ($(grep -c "^##${SLETNAVN}=" "$RAPPORT" || true))"
+            liste "$SLETNAVN"
+            echo
+            echo "### Beholdt som tilbagerulning ($(grep -c '^##BEHOLDT=' "$RAPPORT" || true))"
+            liste BEHOLDT
+            if grep -q '^##KUNNE_IKKE=' "$RAPPORT"; then
+              echo
+              echo "### Kunne ikke slettes"
+              liste KUNNE_IKKE
+            fi
+            echo
+            echo '```text'
+            grep -v '^##' "$RAPPORT" || echo "(boksen svarede ingenting)"
+            echo '```'
+          } >> "$SUMMARY"
+
+          exit "$RC"
