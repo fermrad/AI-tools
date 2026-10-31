@@ -16,14 +16,14 @@ jobs:
 
     steps:
       - name: Checkout PR branch (calling repo)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.head_ref }}
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Checkout AI-tools (for script)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: fermrad/AI-tools
           path: .ai-tools
