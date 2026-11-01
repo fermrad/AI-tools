@@ -53,6 +53,15 @@ done
 
 If the repo **already exists**, skip creation and proceed.
 
+## Step 2b — Sync the feedback widget from `fermrad/lib`
+
+After the clone and the `<appname>` find-replace, **before the first commit**, refresh the vendored feedback widget:
+```bash
+git -C ~/localprojects/lib pull -q --ff-only origin main
+~/localprojects/lib/scripts/sync-feedback-widget.sh <path-to-new-app>
+```
+Why: the boilerplate's `vendor/` copy is a snapshot of `fermrad/lib` and goes stale between bootstraps. Update it at birth, not at the first failure. Never edit `vendor/@fermrad/feedback-widget/` by hand — the next sync overwrites it.
+
 ## Step 3 — Check the remaining prerequisite
 
 `SSH_PRIVATE_KEY` must exist in the target repo's Actions secrets (added by Terraform GitHub → apply):
@@ -230,3 +239,25 @@ After the registrations are created, tell the user:
 4. **Test** — open `/login` and click "Log in with Microsoft". A successful redirect back without `?error=` means the registration is working.
 
 > **Troubleshooting**: `token_exchange_failed` / `AADSTS7000215` means the client secret is wrong or expired. Run `az ad app credential reset --id <APP_ID>` to rotate it and update `.env`.
+
+---
+
+## Step 11 — DevHub feedback: slug and token
+
+The slug is the one thing find-replace cannot necessarily guess, and the token is the one thing that must never be in the repo.
+
+1. **Create the app in DevHub** so `App.slug` exists, and note the slug.
+2. **Check `DEVHUB_APP_SLUG` in `src/lib/feedback.ts`.** The `<appname>` find-replace hits it only if the DevHub slug equals the repo name. If they differ, set it by hand. An unknown slug is *not* an error at DevHub — `/api/feedback/ingest` answers 201 with `appId: null` and the feedback lands nowhere.
+3. **`DEVHUB_INGEST_TOKEN` per environment (dev, staging, prod).** The user creates the token in DevHub themself. **Never ask for the token in chat and never write it to the repo or a command that gets logged.** The token is optional: without it the app runs fine and the widget says _"Feedback er ikke slået til i dette miljø"_.
+
+   Put it where the app reads it — on each box, as in Step 10:
+   - append `DEVHUB_INGEST_TOKEN=<token>` to `/opt/ferm-<repo>/.env`
+   - make sure `DEVHUB_INGEST_TOKEN: ${DEVHUB_INGEST_TOKEN:-}` is in the `environment:` of **every** compose file the environment uses (`docker-compose.yml`, `docker-compose.deploy.yml`, …). A variable in `.env` does not reach the container unless it is also listed there (S-223 «area51 kører på komms API-nøgle»).
+   - redeploy, so the container is recreated with the new environment.
+
+   The GitHub environments (`dev`/`staging`/`production`) hold the deploy secrets and, since S-1515 «App-hemmelighederne flyttes ind i GitHub-miljøerne», copies of the app secrets for CI jobs — but `deploy-app.yml` does not write app secrets to the box. The running app still reads the box's `.env`.
+
+## Step 12 — Verify the feedback path
+
+1. **Without token** (before step 11.3, or in an environment that has none): the widget answers _"Feedback er ikke slået til i dette miljø"_ and the app otherwise works.
+2. **With token**: send a test feedback from the app. It must show up in DevHub under the **right app** — not unassigned (`appId: null`, which means the slug is wrong or unknown).
