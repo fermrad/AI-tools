@@ -86,6 +86,18 @@ on:
 
 jobs:
   backup:
+    # S-1601: jobbet kører i appens GitHub-miljø — samme linje som deploy-
+    # jobbet i deploy-app.yml (S-1497 «R-156 BP1»). Apps, der har flyttet
+    # boks-hemmelighederne (SSH_PRIVATE_KEY og host-secreten) fra repoet ind i
+    # miljøet, kan ellers ikke læse dem herfra: `secrets: inherit` giver kun
+    # repo- og org-secrets, og `secrets[inputs.production_host_secret]` bliver
+    # tom. Så fejler ssh-keyscan mod en tom vært, og backup'en tages aldrig.
+    # area51 er sådan en app. Apps uden miljø-secrets mærker intet: findes
+    # miljøet ikke i kalder-repoet, opretter GitHub det uden regler, og
+    # repo-secrets kan læses som før.
+    # ⚠️ Kræver `production` et review, venter den natlige kørsel på det —
+    # samme vilkår som appens øvrige planlagte jobs i miljøet.
+    environment: ${{ inputs.environment }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Alarmen skriver et issue i det kaldende repo.

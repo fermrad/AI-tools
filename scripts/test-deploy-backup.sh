@@ -60,6 +60,15 @@ fi
 echo "  ok    deploy-app.yml og backup-db.yml deler samme backup-krop"
 [ -s "$SCRIPT" ] || exit 1
 
+# S-1601: den planlagte backup skal køre i appens GitHub-miljø, som deploy-jobbet
+# gør (S-1497). Uden linjen kan en app med boks-hemmelighederne i miljøet ikke
+# nå sin boks, og backup'en fejler hver nat.
+if ! grep -qxF '    environment: ${{ inputs.environment }}' "$BACKUP_WORKFLOW"; then
+  echo "FEJL  backup-db.yml's job kører ikke i appens miljø (environment: \${{ inputs.environment }})." >&2
+  exit 1
+fi
+echo "  ok    backup-db.yml kører i appens GitHub-miljø"
+
 # --- docker-stub: tilstanden styres via miljøvariabler --------------------
 cat > "$TMP/docker" <<'STUB'
 #!/usr/bin/env bash
