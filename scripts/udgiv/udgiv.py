@@ -14,7 +14,8 @@
 #   1. GODKENDELSE VIA ETIKET. `prod-ja` på en PR, sat af et login i appens
 #      `.github/prod-startere.txt` (læst fra main), godkender main TIL OG MED
 #      den PR's merge-commit. Aktøren slås op i PR'ens issue-events (seneste
-#      `labeled`-event for etiketten). Etiketten alene tæller ikke. `data-ja`
+#      `labeled`-event for etiketten). Etiketten alene tæller ikke, og den
+#      skal være sat EFTER PR'ens sidste push (se `etiket`). `data-ja`
 #      virker på samme måde for datamigreringer og afløser `~/.hestevagt-data-ja`.
 #   2. Et planlagt workflow må starte prod, når reglerne ligger i workflowet.
 #   3. Kun udgivelse flyttes; merge-løkken bliver på laptoppen.
@@ -300,26 +301,80 @@ def prs_for(m, sha):
     return m._pr_cache[sha]
 
 
-def etiket(m, pr, navn, startere):
-    """→ (gyldig, login). Etiketten skal sidde på PR'en NU, og det SENESTE
-    `labeled`-event for den skal være sat af et login i prod-startere.txt."""
-    if navn not in [l.get("name") for l in pr.get("labels") or []]:
-        return False, None
-    events, side = [], 1
+def _alle(m, sti, noegle=None):
+    """Alle sider af en liste (per_page=100)."""
+    ud, side, sep = [], 1, "&" if "?" in sti else "?"
     while True:
-        try:
-            del_ = m.api.get(f"/repos/{{repo}}/issues/{pr['number']}/events?per_page=100&page={side}")
-        except ApiFejl:
-            return False, None
-        events += del_
+        svar = m.api.get(f"{sti}{sep}per_page=100&page={side}")
+        del_ = (svar.get(noegle) or []) if noegle else svar
+        ud += del_
         if len(del_) < 100:
-            break
+            return ud
         side += 1
+
+
+def sidste_push(m, pr):
+    """Serverens tidspunkt for, hvornår PR'ens sidste hoved-sha kom på GitHub.
+
+    = den ÆLDSTE `pull_request`-kørsel for `head.sha` fra PR'ens egen gren.
+    Commit-datoer kan forfalskes (`git commit --date`) og bruges IKKE. Målt
+    11-11-2026 på cli/cli#15009: issue-timeline's `committed`-events har kun
+    git-datoer (author/committer), intet `created_at`; workflow-kørslers
+    `created_at` sættes af GitHub, 9 s efter pushet. Et push kan ikke få en
+    kørsel, der er ældre end pushet selv. `pull_requests` på kørslen er tom
+    efter merge, så grenen (`head_branch` + `head_repository`) binder den til
+    PR'en. Ingen kørsel (`[skip ci]`, ingen PR-CI) → None: kan ikke måles.
+    """
+    hoved = pr.get("head") or {}
+    sha, gren = hoved.get("sha"), hoved.get("ref")
+    repo = (hoved.get("repo") or {}).get("full_name")
+    if not sha or not gren:
+        return None
+    try:
+        runs = _alle(m, f"/repos/{{repo}}/actions/runs?head_sha={sha}&event=pull_request", "workflow_runs")
+    except ApiFejl:
+        return None
+    tider = [r["created_at"] for r in runs
+             if r.get("head_branch") == gren and r.get("created_at")
+             and (not repo or (r.get("head_repository") or {}).get("full_name") == repo)]
+    return min(tider) if tider else None
+
+
+def etiket(m, pr, navn, startere):
+    """→ (gyldig, login, hvorfor ikke). Etiketten skal sidde på PR'en NU, det
+    SENESTE `labeled`-event for den skal være sat af et login i
+    prod-startere.txt, og det skal være sat EFTER PR'ens sidste push (Jakob
+    11-11-2026: godkendelsen gælder kun det, PR'en indeholdt, da den blev sat).
+
+    Alle tider er serverens (`created_at`, ISO-8601 i UTC, så de kan sammenlignes
+    som tekst). Gyldig, når etiketten er sat
+      · efter `merged_at` — så ligger indholdet fast; eller
+      · efter `sidste_push`, og ingen `head_ref_force_pushed` kom efter den.
+    """
+    if navn not in [l.get("name") for l in pr.get("labels") or []]:
+        return False, None, ""
+    try:
+        events = _alle(m, f"/repos/{{repo}}/issues/{pr['number']}/events")
+    except ApiFejl:
+        return False, None, "kan ikke læses"
     sat = [e for e in events if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == navn]
     if not sat:
-        return False, None
+        return False, None, ""
     login = (sat[-1].get("actor") or {}).get("login")
-    return bool(login) and login in startere, login
+    if not login or login not in startere:
+        return False, login, f"er sat af {login}, som ikke står i prod-startere.txt — tæller ikke"
+    tid = sat[-1].get("created_at") or ""
+    if pr.get("merged_at") and tid >= pr["merged_at"]:
+        return True, login, ""
+    if any(e.get("event") == "head_ref_force_pushed" and (e.get("created_at") or "") > tid for e in events):
+        return False, login, "er sat før et senere force-push — sæt den igen"
+    push = sidste_push(m, pr)
+    if push is None:
+        return False, login, ("er sat før merge, og tidspunktet for PR'ens sidste push kan ikke måles "
+                              f"(ingen pull_request-kørsel for {(pr.get('head') or {}).get('sha', '')[:8]}) — sæt den igen efter merge")
+    if tid <= push:
+        return False, login, "er sat før sidste push — sæt den igen"
+    return True, login, ""
 
 
 def statusser(m, sha):
@@ -397,14 +452,20 @@ def blokerende_data(m, c, startere):
                 continue
         blok.append(f)
     if blok:
-        for pr in prs_for(m, c):
-            gyldig, login = etiket(m, pr, "data-ja", startere)
+        prs = prs_for(m, c)
+        if not prs:
+            # Jakob 11-11-2026: en datafil i et direkte push udgives aldrig af
+            # workflowet — der er ingen PR at sætte data-ja på.
+            m.log(f"   · {c[:8]} er et direkte push: datafil uden PR — kræver manuel prod-start af en fra prod-startere.txt")
+            return blok
+        for pr in prs:
+            gyldig, login, hvorfor = etiket(m, pr, "data-ja", startere)
             if gyldig:
                 for f in blok:
                     m.log(f"   · {f} har data-ja på #{pr['number']} (sat af {login}) — tilladt")
                 return []
-            if login:
-                m.log(f"   · data-ja på #{pr['number']} er sat af {login}, som ikke står i prod-startere.txt — tæller ikke")
+            if hvorfor:
+                m.log(f"   · data-ja på #{pr['number']} {hvorfor}")
     return blok
 
 
@@ -471,13 +532,13 @@ def vaelg(m):
             for pr in prs_for(m, c):
                 if pr.get("merge_commit_sha") != c:
                     continue
-                gyldig, login = etiket(m, pr, "prod-ja", startere)
+                gyldig, login, hvorfor = etiket(m, pr, "prod-ja", startere)
                 if gyldig:
                     graense = c
                     m.log(f"   🔒 godkendt til og med {c[:8]} (#{pr['number']} prod-ja sat af {login})")
                     break
-                if login:
-                    m.log(f"   · prod-ja på #{pr['number']} er sat af {login}, som ikke står i prod-startere.txt — tæller ikke")
+                if hvorfor:
+                    m.log(f"   · prod-ja på #{pr['number']} {hvorfor}")
             if graense:
                 break
         if not graense:

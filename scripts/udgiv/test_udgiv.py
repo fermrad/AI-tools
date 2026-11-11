@@ -57,6 +57,19 @@
 # │ E3 │ rød i «Setup SSH», 2 forsøg før                      │ forsøg 3/3 + rødliste        │
 # │ E4 │ rød i «Run SQL scripts»                              │ rødliste med det samme       │
 # │ E5 │ jobs kan ikke læses                                  │ rødliste (laptoppens default)│
+# ├────┼──────────────────────────────────────────────────────┼──────────────────────────────┤
+# │    │ «sidste push» = ældste pull_request-kørsel for PR'ens │                              │
+# │    │ head.sha på dens gren (serverens created_at).        │                              │
+# │    │ Standard: push 08:00, etiket 08:30, merge 09:00 UTC. │                              │
+# │ P1 │ push 08:45 efter prod-ja 08:30 (ærlig commit-dato)   │ intet, «sæt den igen»        │
+# │ P2 │ samme, men prod-ja sat igen 09:30 efter merge        │ udgiver c2                   │
+# │ P3 │ fjernet og sat igen 08:50 efter push 08:45           │ udgiver c2                   │
+# │ P4 │ ingen pull_request-kørsel for head.sha               │ intet, «kan ikke måles»      │
+# │ P5 │ force-push 08:40 efter prod-ja 08:30                 │ intet udgives                │
+# │ P6 │ kørsel på en anden gren 07:00, egen 08:45            │ den anden tæller ikke        │
+# │ P7 │ data-ja 08:30 før push 08:45                         │ data venter                  │
+# │ I1 │ commit-dato forfalsket til 01-11, push 08:45         │ intet udgives                │
+# │ J1 │ datafil i et direkte push (c1), prod-ja på #3        │ intet, «datafil uden PR»     │
 # └────┴──────────────────────────────────────────────────────┴──────────────────────────────┘
 # =====================================================================
 import os
@@ -82,6 +95,7 @@ def utc(s):
 class FalskApi:
     def __init__(self):
         self.prs = {}          # sha → [pr]
+        self.pr_runs = {}      # head-sha → [pull_request-kørsel]
         self.events = {}       # nr → [event]
         self.runs = {}         # (workflow, sha) → (status, conclusion)
         self.statusser = {}    # sha → [status], nyeste først
@@ -98,6 +112,8 @@ class FalskApi:
             return self.prs.get(m[1], [])
         if m := re.fullmatch(r"/repos/\{repo\}/issues/(\d+)/events\?per_page=100&page=(\d+)", sti):
             return self.events.get(int(m[1]), []) if m[2] == "1" else []
+        if m := re.fullmatch(r"/repos/\{repo\}/actions/runs\?head_sha=(\w+)&event=pull_request&per_page=100&page=(\d+)", sti):
+            return {"workflow_runs": self.pr_runs.get(m[1], []) if m[2] == "1" else []}
         if m := re.fullmatch(r"/repos/\{repo\}/actions/workflows/([\w.-]+)/runs\?head_sha=(\w+)&event=push&per_page=1", sti):
             k = self.runs.get((m[1], m[2]))
             return {"workflow_runs": [{"status": k[0], "conclusion": k[1]}] if k else []}
@@ -116,13 +132,30 @@ class FalskApi:
         return {}
 
 
+# Serverens tider (UTC). Standard: push → etiket → merge.
+PUSH, SAT, MERGET = "2026-11-11T08:00:00Z", "2026-11-11T08:30:00Z", "2026-11-11T09:00:00Z"
+APP_REPO = "fermrad/project"
+
+
 def pr(nr, merge_sha, *etiketter):
-    return {"number": nr, "merged_at": "2026-11-11T09:00:00Z", "base": {"ref": "main"},
+    # head.sha = merge-sha'en (som ved rebase-merge); den findes i prøve-repoet.
+    return {"number": nr, "merged_at": MERGET, "base": {"ref": "main"},
+            "head": {"sha": merge_sha, "ref": f"gren-{nr}", "repo": {"full_name": APP_REPO}},
             "merge_commit_sha": merge_sha, "labels": [{"name": e} for e in etiketter]}
 
 
-def sat(navn, login):
-    return {"event": "labeled", "label": {"name": navn}, "actor": {"login": login}}
+def sat(navn, login, tid=SAT):
+    return {"event": "labeled", "label": {"name": navn}, "actor": {"login": login}, "created_at": tid}
+
+
+def koersel(nr, tid=PUSH, gren=None):
+    return {"created_at": tid, "event": "pull_request", "head_branch": gren or f"gren-{nr}",
+            "head_repository": {"full_name": APP_REPO}}
+
+
+def med_pr(api, nr, sha, *etiketter, push=PUSH):
+    api.prs[sha] = [pr(nr, sha, *etiketter)]
+    api.pr_runs[sha] = [koersel(nr, push)]
 
 
 def job(navn, konklusion, *trin):
@@ -133,7 +166,8 @@ def job(navn, konklusion, *trin):
 class Repo:
     """prod = c0 → c1 (direkte push) → c2 (#2) → c3 (#3) = main."""
 
-    def __init__(self, data_c2=None, data_c1=None, varsel_i_prod=True, kraev=None):
+    def __init__(self, data_c2=None, data_c1=None, varsel_i_prod=True, kraev=None, dato=PUSH):
+        self.dato = dato  # commit-datoen i git — kan sættes til hvad som helst
         self.dir = tempfile.mkdtemp(prefix="udgiv-proeve-")
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.email", "t@t")
@@ -159,7 +193,8 @@ class Repo:
         self.git("update-ref", "refs/remotes/origin/main", self.c3)
 
     def git(self, *a):
-        return subprocess.run(["git", "-C", self.dir, *a], check=True, capture_output=True, text=True).stdout.strip()
+        e = dict(os.environ, GIT_AUTHOR_DATE=self.dato, GIT_COMMITTER_DATE=self.dato)
+        return subprocess.run(["git", "-C", self.dir, *a], check=True, capture_output=True, text=True, env=e).stdout.strip()
 
     def skriv(self, sti, tekst):
         p = os.path.join(self.dir, sti)
@@ -204,10 +239,10 @@ def koer(repo, api, nu=NU, prod=None, **over):
     return udgiv.vaelg(m), "\n".join(m.linjer)
 
 
-def godkendt(api, repo, nr=2, login=MADS):
+def godkendt(api, repo, nr=2, login=MADS, tid=SAT, push=PUSH):
     sha = repo.c2 if nr == 2 else repo.c3
-    api.prs[sha] = [pr(nr, sha, "prod-ja")]
-    api.events[nr] = [sat("prod-ja", login)]
+    med_pr(api, nr, sha, "prod-ja", push=push)
+    api.events[nr] = [sat("prod-ja", login, tid)]
 
 
 # ------------------------------------------------------------------ slot
@@ -278,7 +313,7 @@ class Godkendelse(unittest.TestCase):
 
     def test_g3_seneste_event_taeller(self):
         godkendt(self.a, self.r)
-        self.a.events[2] = [sat("prod-ja", JAKOB), {"event": "unlabeled", "label": {"name": "prod-ja"}}, sat("prod-ja", BOT)]
+        self.a.events[2] = [sat("prod-ja", JAKOB), {"event": "unlabeled", "label": {"name": "prod-ja"}}, sat("prod-ja", BOT, "2026-11-11T08:40:00Z")]
         self.assertFalse(koer(self.r, self.a)[0].udgiv)
 
     def test_g4_direkte_push_under_godkendt_pr(self):
@@ -301,15 +336,71 @@ class Godkendelse(unittest.TestCase):
         self.assertFalse(v.udgiv, log)
 
 
+# --------------------------------------------------- sat efter sidste push
+class SidstePush(unittest.TestCase):
+    """Jakob 11-11-2026: prod-ja gælder kun det, PR'en indeholdt, da den blev sat."""
+
+    def setUp(self):
+        self.r, self.a = Repo(), FalskApi()
+        alt_groent(self.a, self.r)
+
+    def test_p1_push_efter_etiketten(self):
+        godkendt(self.a, self.r, push="2026-11-11T08:45:00Z")
+        v, log = koer(self.r, self.a)
+        self.assertFalse(v.udgiv, log)
+        self.assertIn("prod-ja på #2 er sat før sidste push — sæt den igen", log)
+
+    def test_p2_sat_igen_efter_merge(self):
+        godkendt(self.a, self.r, tid="2026-11-11T09:30:00Z", push="2026-11-11T08:45:00Z")
+        v, log = koer(self.r, self.a)
+        self.assertEqual(v.sha, self.r.c2, log)
+
+    def test_p3_fjernet_og_sat_igen(self):
+        godkendt(self.a, self.r, push="2026-11-11T08:45:00Z")
+        self.a.events[2] = [sat("prod-ja", JAKOB), {"event": "unlabeled", "label": {"name": "prod-ja"}},
+                            sat("prod-ja", JAKOB, "2026-11-11T08:50:00Z")]
+        v, log = koer(self.r, self.a)
+        self.assertEqual(v.sha, self.r.c2, log)
+
+    def test_p4_push_kan_ikke_maales(self):
+        godkendt(self.a, self.r)
+        self.a.pr_runs[self.r.c2] = []
+        v, log = koer(self.r, self.a)
+        self.assertFalse(v.udgiv, log)
+        self.assertIn("kan ikke måles", log)
+
+    def test_p5_force_push_efter_etiketten(self):
+        godkendt(self.a, self.r)
+        self.a.events[2].append({"event": "head_ref_force_pushed", "created_at": "2026-11-11T08:40:00Z"})
+        v, log = koer(self.r, self.a)
+        self.assertFalse(v.udgiv, log)
+        self.assertIn("force-push", log)
+
+    def test_p6_koersel_fra_anden_gren_taeller_ikke(self):
+        godkendt(self.a, self.r, push="2026-11-11T08:45:00Z")
+        self.a.pr_runs[self.r.c2].append(koersel(2, "2026-11-11T07:00:00Z", gren="en-anden"))
+        self.assertFalse(koer(self.r, self.a)[0].udgiv)
+
+    def test_i1_falsk_aeldre_commit_dato(self):
+        # Pushet kom 08:45 (serveren), commit'en påstår 01-11 (git commit --date).
+        r = Repo(dato="2026-11-01T00:00:00Z")
+        a = FalskApi()
+        alt_groent(a, r)
+        godkendt(a, r, push="2026-11-11T08:45:00Z")
+        v, log = koer(r, a)
+        self.assertFalse(v.udgiv, log)
+        self.assertIn("sat før sidste push", log)
+
+
 # -------------------------------------------------------------- datagate
 class Data(unittest.TestCase):
-    def lav(self, sti, tekst, data_ja=None, i_c1=False, moenster="^scripts/sql/"):
+    def lav(self, sti, tekst, data_ja=None, i_c1=False, moenster="^scripts/sql/", push=PUSH):
         r = Repo(data_c1=(sti, tekst) if i_c1 else None, data_c2=None if i_c1 else (sti, tekst))
         a = FalskApi()
         alt_groent(a, r)
         godkendt(a, r, nr=3)
         if data_ja:
-            a.prs[r.c2] = [pr(2, r.c2, "data-ja")]
+            med_pr(a, 2, r.c2, "data-ja", push=push)
             a.events[2] = [sat("data-ja", data_ja)]
         return koer(r, a, DATA_MOENSTER=moenster), r
 
@@ -346,6 +437,18 @@ class Data(unittest.TestCase):
         (v, log), r = self.lav("scripts/backfill-x.ts", "console.log(1)\n",
                                moenster="^scripts/([^/]*\\.sql|backfill-|sql/)")
         self.assertEqual(v.sha, r.c1, log)
+
+    def test_p7_data_ja_foer_sidste_push(self):
+        (v, log), r = self.lav("scripts/sql/600-x.sql", "update projekt set navn = 'x';\n", data_ja=JAKOB,
+                               push="2026-11-11T08:45:00Z")
+        self.assertEqual(v.sha, r.c1, log)
+        self.assertIn("data-ja på #2 er sat før sidste push — sæt den igen", log)
+
+    def test_j1_datafil_i_direkte_push(self):
+        (v, log), r = self.lav("scripts/sql/600-x.sql", "update projekt set navn = 'x';\n", i_c1=True)
+        self.assertFalse(v.udgiv, log)
+        self.assertIn(f"{r.c1[:8]} er et direkte push: datafil uden PR — kræver manuel prod-start "
+                      "af en fra prod-startere.txt", log)
 
     def test_d7_kun_check(self):
         (v, log), r = self.lav("scripts/sql/500-check.sql", "alter table x add constraint c check (y > 0);\n")
