@@ -1,0 +1,279 @@
+# Planlagt udgivelse til prod uden laptop — kaldes fra hver apps egen
+# `.github/workflows/udgiv.yml` via
+# `uses: fermrad/AI-tools/.github/workflows/udgiv-app.yml@<sha>`.
+#
+# HVORFOR den findes (S-1633 «Udgivelse uden laptop: fælles workflow
+# «udgiv-app.yml» i AI-tools med godkendelse via etiket»): project og area51
+# gik i prod gennem `hestevagt-dispatch.sh` på Jakobs laptop, startet af
+# launchd hvert 10. minut. Sov Mac'en, gik slottet tabt (10-11-2026 kl. 17 og
+# 22). Jakob 11-11-2026: «kan vi flytte dispatchen over på hesten, med de
+# rigtige rammer og godkendelser, så det ikke er afhængig af at min mac er
+# online?» — og «ok, sæt i gang».
+#
+# Logikken bor i `scripts/udgiv/udgiv.py` (prøvet uden GitHub af
+# `scripts/test-udgiv-app.sh`). Workflowet henter den fra AI-tools ved
+# PRÆCIS den sha, kalderen har pinnet (`job.workflow_sha`), så det, der
+# kører, er det, kalderen pegede på.
+#
+# TO FASER, fordi selve deployet skal kaldes af appens egen workflow
+# (`uses:` kan ikke tage et udtryk, og `deploy.yml` bor i appen):
+#
+#   fase: vaelg   → måler prod, vælger kandidaten, tjekker godkendelse,
+#                   datagate, grøn, rødliste, indholdskrav, slot.
+#                   Outputs: udgiv ('true'/'false'), sha, prod_foer, slot.
+#   (kalderen)    → `uses: ./.github/workflows/deploy.yml` med
+#                   environment=production, ref=<sha>, varsel_minutter=5.
+#                   Da er `github.event_name` stadig `schedule` hele vejen
+#                   («the github context is always associated with the caller
+#                   workflow»).
+#   fase: efter   → health skal svare den udgivne sha; ellers: stoppede
+#                   kørslen før boksen blev rørt, et nyt forsøg (højst 3),
+#                   ellers rødliste.
+#
+# REGLERNE (oversat fra laptoppen; grundene står i udgiv.py):
+#   · SLOT: kalderens cron + `slots_hverdag`/`slots_weekend`. Slottet regnes
+#     fra det PLANLAGTE tidspunkt (fundet ud fra `github.event.schedule`), ikke
+#     fra starttiden, så et forsinket schedule ikke rammer forkert time. Kommer
+#     kørslen mere end `maks_forsinkelse_minutter` for sent, udgives intet.
+#     Højst én udgivelse pr. slot: en tidligere kørsel i slottet, der rørte
+#     boksen, lukker slottet; en, der stoppede før boksen, gør ikke.
+#   · PROD-SHA fra `<url>/api/health` → `sha`. Intet svar → springes over.
+#   · GODKENDELSE (`kraever_godkendelse`): kun til og med merge-commit'en af
+#     den nyeste PR med `prod-ja`, sat af et login i `.github/prod-startere.txt`
+#     på main (seneste `labeled`-event i PR'ens issue-events).
+#   · DATAGATE: en datafil (`data_moenster`), der ændrer rækker, kræver
+#     `data-ja` på den PR, der bragte den — undtagen kort- og kontaktdata
+#     (Jakob 5-10-2026). Ellers udgives kun op til commit'en før.
+#   · KANDIDAT: nyeste commit mellem prod og toppen, grøn på både `ci_workflow`
+#     (tom = intet CI-krav, area51) og `staging_workflow` (push-kørsler).
+#   · RØDLISTE: commit-statussen `udgiv/roed` = failure på sha'en. Ryd i hånden
+#     med en nyere `udgiv/roed` = success.
+#   · INDHOLDSKRAV: `.github/udgiv-kraev.txt` på main, `<fil> <mønster>` pr. linje.
+#   · TØRLØB: `toerloeb` (default true) gør alt undtagen at sige «udgiv».
+#     En ikke-planlagt kørsel er altid tørløb.
+#
+# LÅS: kalderen SKAL have
+#     concurrency: { group: udgiv-${{ github.repository }}, cancel-in-progress: false }
+# på workflow-niveau, så vælg → deploy → efter er ét låst forløb. Fasen vaelg
+# springer desuden over, hvis en anden kørsel af kalderen er i gang.
+# Gruppen må ikke hedde det samme som deploy.yml's (`deploy-production`) —
+# en kaldt workflow, der venter på kalderens gruppe, går i baglås.
+#
+# TILLADELSER: kun repoets kortlivede GITHUB_TOKEN, ingen hemmeligheder.
+#   vaelg: contents: read        — klone appen (privat repo)
+#          actions: read         — CI/staging-kørsler pr. commit, kørsler i slottet
+#          pull-requests: read   — PR'er pr. commit (`commits/{sha}/pulls`)
+#          issues: read          — etikettens `labeled`-events
+#          statuses: read        — rødlisten
+#   efter: actions: read         — jobs og trin i denne kørsel
+#          statuses: write       — skrive `udgiv/forsoeg` og `udgiv/roed`
+# Kalderjobbet giver foreningen (en kaldt workflow kan kun skrue ned).
+# Prod-hemmelighederne bliver i GitHub-miljøet `production`; denne workflow
+# bruger intet miljø.
+#
+# Runneren er hestens (`[self-hosted, fermhest]`, som project's og area51's
+# CI). Den skal kunne nå `<url>/api/health` — area51 kun over Tailscale.
+
+name: Udgiv app
+
+on:
+  workflow_call:
+    inputs:
+      fase:
+        description: 'vaelg | efter'
+        type: string
+        required: true
+      app:
+        description: 'Appens navn i loggen (project, area51)'
+        type: string
+        required: true
+      url:
+        description: 'Prod-URL; health læses på <url>/api/health'
+        type: string
+        required: true
+      data_moenster:
+        description: 'Regex (ERE) for datafiler, fx ^scripts/sql/'
+        type: string
+        default: ''
+      ci_workflow:
+        description: 'CI-workflowets fil (ci.yml), tom = intet CI-krav'
+        type: string
+        default: ''
+      staging_workflow:
+        description: 'Deploy-workflowets fil; push-kørslen er staging'
+        type: string
+        default: deploy.yml
+      kraever_godkendelse:
+        description: 'true = kun til og med den nyeste PR med gyldig prod-ja'
+        type: boolean
+        default: true
+      slots_hverdag:
+        description: 'Dansk time for hverdagenes slots, fx "12 17 22"'
+        type: string
+        default: ''
+      slots_weekend:
+        description: 'Dansk time for weekendens slots, fx "07 12 16 22"'
+        type: string
+        default: ''
+      tidszone:
+        description: 'Tidszonen, slottene står i'
+        type: string
+        default: Europe/Copenhagen
+      cron_tidszone:
+        description: 'Tidszonen, kalderens cron står i (schedule.timezone, ellers UTC)'
+        type: string
+        default: Europe/Copenhagen
+      maks_forsinkelse_minutter:
+        description: 'Kommer et schedule senere end dette, udgives intet'
+        type: number
+        default: 25
+      varsel_script:
+        description: 'Fil, prod-versionen skal have, før varsel_minutter virker'
+        type: string
+        default: scripts/driftsvarsel-saet.ts
+      toerloeb:
+        description: 'true = alt undtagen at sige «udgiv»'
+        type: boolean
+        default: true
+      runs_on:
+        description: 'JSON-liste med runner-etiketter'
+        type: string
+        default: '["self-hosted", "fermhest"]'
+      # Kun fase efter:
+      sha:
+        type: string
+        default: ''
+      prod_foer:
+        type: string
+        default: ''
+      slot:
+        type: string
+        default: ''
+      deploy_resultat:
+        description: 'needs.<deploy>.result'
+        type: string
+        default: ''
+    outputs:
+      udgiv:
+        description: "'true', når kalderen skal starte deployet"
+        value: ${{ jobs.vaelg.outputs.udgiv }}
+      sha:
+        value: ${{ jobs.vaelg.outputs.sha }}
+      prod_foer:
+        value: ${{ jobs.vaelg.outputs.prod_foer }}
+      slot:
+        value: ${{ jobs.vaelg.outputs.slot }}
+
+jobs:
+  vaelg:
+    name: Vælg
+    if: ${{ inputs.fase == 'vaelg' }}
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      issues: read
+      statuses: read
+    outputs:
+      udgiv: ${{ steps.vaelg.outputs.udgiv }}
+      sha: ${{ steps.vaelg.outputs.sha }}
+      prod_foer: ${{ steps.vaelg.outputs.prod_foer }}
+      slot: ${{ steps.vaelg.outputs.slot }}
+    steps:
+      # Uden de to værdier ville checkout'en nedenfor falde tilbage til APPENS
+      # repo og køre en `scripts/udgiv/udgiv.py` derfra. Fejler lukket.
+      - name: Kend AI-tools' egen sha
+        env:
+          WF_REPO: ${{ job.workflow_repository }}
+          WF_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ "${WF_REPO,,}" != fermrad/ai-tools ] || ! printf '%s' "$WF_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error title=Ukendt workflow-sha::job.workflow_repository='$WF_REPO' job.workflow_sha='$WF_SHA'"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .udgiv-ai-tools
+          sparse-checkout: scripts/udgiv
+          persist-credentials: false
+      # Hele historikken: datagaten læser hver commit mellem prod og main.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: .udgiv-app
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Vælg kandidaten
+        id: vaelg
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          KLON: .udgiv-app
+          APP: ${{ inputs.app }}
+          URL: ${{ inputs.url }}
+          DATA_MOENSTER: ${{ inputs.data_moenster }}
+          CI_WORKFLOW: ${{ inputs.ci_workflow }}
+          STAGING_WORKFLOW: ${{ inputs.staging_workflow }}
+          KRAEVER_GODKENDELSE: ${{ inputs.kraever_godkendelse }}
+          SLOTS_HVERDAG: ${{ inputs.slots_hverdag }}
+          SLOTS_WEEKEND: ${{ inputs.slots_weekend }}
+          TIDSZONE: ${{ inputs.tidszone }}
+          CRON_TIDSZONE: ${{ inputs.cron_tidszone }}
+          MAKS_FORSINKELSE: ${{ inputs.maks_forsinkelse_minutter }}
+          VARSEL_SCRIPT: ${{ inputs.varsel_script }}
+          TOERLOEB: ${{ inputs.toerloeb }}
+          SCHEDULE: ${{ github.event.schedule }}
+          EVENT_NAME: ${{ github.event_name }}
+          STARTERE_FIL: .github/prod-startere.txt
+          KRAEV_FIL: .github/udgiv-kraev.txt
+          DEPLOY_JOB_MOENSTER: '(^|/ )deploy$'
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: python3 -I .udgiv-ai-tools/scripts/udgiv/udgiv.py vaelg
+
+  efter:
+    name: Efter deployet
+    if: ${{ inputs.fase == 'efter' }}
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      statuses: write
+    steps:
+      - name: Kend AI-tools' egen sha
+        env:
+          WF_REPO: ${{ job.workflow_repository }}
+          WF_SHA: ${{ job.workflow_sha }}
+        run: |
+          if [ "${WF_REPO,,}" != fermrad/ai-tools ] || ! printf '%s' "$WF_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error title=Ukendt workflow-sha::job.workflow_repository='$WF_REPO' job.workflow_sha='$WF_SHA'"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .udgiv-ai-tools
+          sparse-checkout: scripts/udgiv
+          persist-credentials: false
+      - name: Health, nyt forsøg eller rødliste
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          KLON: .
+          APP: ${{ inputs.app }}
+          URL: ${{ inputs.url }}
+          SHA: ${{ inputs.sha }}
+          PROD_FOER: ${{ inputs.prod_foer }}
+          SLOT: ${{ inputs.slot }}
+          DEPLOY_RESULTAT: ${{ inputs.deploy_resultat }}
+          DEPLOY_JOB_MOENSTER: '(^|/ )deploy$'
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error title=Ingen sha::fase efter kræver den sha, vaelg valgte"; exit 1
+          fi
+          python3 -I .udgiv-ai-tools/scripts/udgiv/udgiv.py efter
