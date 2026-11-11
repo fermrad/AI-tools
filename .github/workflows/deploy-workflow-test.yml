@@ -125,8 +125,9 @@ jobs:
 
       # S-1633 «Udgivelse uden laptop …»: den planlagte udgivelse. Logikken i
       # scripts/udgiv/udgiv.py prøves mod fixtures og et rigtigt git-repo —
-      # slot over sommer-/vintertid, prod-ja/data-ja-aktøren, kandidatvalg,
-      # rødliste og nyt forsøg — og otte bevidst ødelagte kopier skal fældes.
+      # slot over sommer-/vintertid, prod-ja/data-ja-aktøren og etiket sat efter
+      # sidste push, kandidatvalg, rødliste og nyt forsøg — og elleve bevidst
+      # ødelagte kopier skal fældes, hver af sin egen prøve.
       - name: Test den planlagte udgivelse
         run: bash scripts/test-udgiv-app.sh
 
