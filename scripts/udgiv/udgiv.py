@@ -23,8 +23,9 @@
 #   · LØBENDE DISPATCH, DAGSTILLADELSE og NATTEVINDUET 22–06. Slottene
 #     (Jakob 13-10 og 19-10) har afløst dem; de var filer på laptoppen.
 #   · `node scripts/dispatch-sha.mjs --tjek`. Samme spørgsmål stilles af
-#     deploy.yml's `prod_ref_port` og AI-tools' `ref_gate` (S-1313), som
-#     kører i den kørsel, vi starter.
+#     deploy.yml's `prod_ref_port` og AI-tools' `ref_gate`, som
+#     kører i den kørsel, vi starter (målt i project's
+#     `scripts/prod-ref-port.mjs`).
 #   · `hestevagt-godkend.sh`. Miljøet `production` har ingen påkrævede
 #     godkendere på GitHub Team; porten er `prod_port` (se PR-teksten).
 #
@@ -169,7 +170,7 @@ def maal_tabeller(tekst):
     """Tabeller, en datafil skriver i (insert/update/delete/merge), i små bogstaver.
 
     `on conflict … do update set` er en upsert på INSERT'ens egen tabel, ikke
-    en opdatering af tabellen «set» (8-10-2026: stoppede S-1207 i 550/610).
+    en opdatering af tabellen «set» (8-10-2026: stoppede et punkt i 550/610).
     """
     tabeller = set()
     for linje in _uden_kommentarer(tekst):
@@ -196,7 +197,7 @@ def kun_kortdata(tekst):
 
 
 def aendrer_raekker(tekst):
-    # Kun en fil, der faktisk RØRER RÆKKER, stopper. Målt 30-09-2026: S-1112's
+    # Kun en fil, der faktisk RØRER RÆKKER, stopper. Målt 30-09-2026:
     # `500-anlaegsregister-fortrolighed.sql` tilføjer kun CHECK-regler til to
     # nye, tomme tabeller — den skal ikke holde en udgivelse tilbage.
     return any(re.search(r"\b(insert|update|delete|truncate|merge)\b|drop[ \t]+(table|column)", l, re.I)
@@ -550,7 +551,9 @@ def vaelg(m):
 
     # ⚠️ DRIFTSVARSEL 5 MINUTTER FØR (Jakob 1-10-2026). deploy.yml skal kende
     # `varsel_minutter`, og PROD's egen version skal have varsel-scriptet
-    # (S-1122: den version, der bringer scriptet ud, kan ikke selv bruge det).
+    # (S-1122 «Prod-deployet sætter selv driftsvarslet 5 minutter før genstart
+    # — også om natten»: den version, der bringer scriptet ud, kan ikke selv
+    # bruge det).
     if "varsel_minutter" not in m.git("show", f"{e['HOVED']}:.github/workflows/{e['STAGING_WORKFLOW']}", tjek=False):
         return stop("deploy.yml kan ikke sætte driftsvarslet",
                     "   ⛔ deploy.yml kan ikke selv sætte driftsvarslet endnu — udgivelse er lukket, indtil det kan")

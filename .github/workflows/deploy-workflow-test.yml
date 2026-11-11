@@ -33,7 +33,8 @@ on:
       # S-962: den ugentlige oprydning (oprydning.yml) og dens test.
       - '.github/workflows/oprydning.yml'
       - 'scripts/test-deploy-oprydning.sh'
-      # S-1633: den planlagte udgivelse (udgiv-app.yml), dens logik og prøve.
+      # S-1633 «Udgivelse uden laptop: fælles workflow «udgiv-app.yml» i
+      # AI-tools med godkendelse via etiket»: workflowet, logikken og prøven.
       - '.github/workflows/udgiv-app.yml'
       - 'scripts/udgiv/**'
       - 'scripts/test-udgiv-app.sh'
@@ -122,7 +123,7 @@ jobs:
       - name: Test den ugentlige oprydning
         run: bash scripts/test-deploy-oprydning.sh
 
-      # S-1633: den planlagte udgivelse (udgiv-app.yml). Logikken i
+      # S-1633 «Udgivelse uden laptop …»: den planlagte udgivelse. Logikken i
       # scripts/udgiv/udgiv.py prøves mod fixtures og et rigtigt git-repo —
       # slot over sommer-/vintertid, prod-ja/data-ja-aktøren, kandidatvalg,
       # rødliste og nyt forsøg — og otte bevidst ødelagte kopier skal fældes.

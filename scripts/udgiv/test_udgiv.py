@@ -138,7 +138,7 @@ class Repo:
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.email", "t@t")
         self.git("config", "user.name", "t")
-        self.skriv(".github/prod-startere.txt", f"# R-156\n{JAKOB}\n{MADS}\n")
+        self.skriv(".github/prod-startere.txt", f"# hvem må starte prod\n{JAKOB}\n{MADS}\n")
         self.skriv(".github/workflows/deploy.yml", "on:\n  workflow_call:\n    inputs:\n      varsel_minutter: {}\n")
         if varsel_i_prod:
             self.skriv("scripts/driftsvarsel-saet.ts", "// varsel\n")
