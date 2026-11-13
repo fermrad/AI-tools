@@ -1,7 +1,9 @@
 ---
 name: push-to-remote
-description: Push the current local Claude conversation to claude-dev.ferm.dk and resume it there
+description: Flyt den aktuelle lokale samtale til claude-dev.ferm.dk og fortsæt den i browseren. Til HEADLESS agentarbejde er `hest-agent` husets primære remote fra 03-09-2026.
 ---
+
+> **Hesten er husets primære remote (Jakob, 03-09-2026).** Denne skill giver en *interaktiv* session i browseren og går stadig via claude-dev.ferm.dk, fordi den kræver `start-claude-session.yml` i `fermrad/infrastructure` (root-SSH til 178.105.186.39). At pege den på `fermhest` er sin egen opgave med en credential-beslutning — se S-700. Skal arbejdet bare *køre*, uden dig ved tastaturet: brug **`hest-agent`**.
 
 Push the current local Claude Code conversation to claude-dev.ferm.dk and resume it as a remote session.
 
