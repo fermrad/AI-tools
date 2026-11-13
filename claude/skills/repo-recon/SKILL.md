@@ -144,8 +144,24 @@ what they do:
    consumer of the weekly quota, so check the quota before proposing a queue of
    several points, and say in the report what the queue will cost.
 
+   **Size decides the branch.** Since 06-11-2026, small points in `area51` and
+   `project` do not get a branch each: they are collected on one *samling* branch
+   (one PR, one CI run, one deploy) that is closed before each dispatch slot. A point
+   that touches the access model, a schema or needs `opus` keeps its own branch.
+   Hesten pushes as the GitHub App `ferm-hest` (03-11-2026); its agents still never
+   open PRs — that checkpoint stays on the laptop.
+
 2. **Build** — branch from `main`, develop, and verify the change in the running
    app with **`/run`** (tests passing is not the same as the app working).
+   - **A change the user can see is tested in a real browser** (house rule
+     06-11-2026): Playwright against the dev server, doing what the user does —
+     click, save, reload. Screenshots at 1440×900 and 1280×800 with the menu
+     open, before and after. The PR body carries a `Set i browser: …` line; without
+     it the house merge loop (its `ui_testet` gate) will not merge the PR. Look at the screenshots yourself —
+     an agent that writes "not seen" has not tested.
+   - **Help follows the surface** (`project`, house rule 27-10-2026): a PR that
+     changes a surface updates the help registry in the same PR and carries a
+     `Hjælp: …` line (or `Hjælp: uændret, …` with the reason). `scripts/hjaelpe-vagt.mjs` checks it in CI.
 3. **`/simplify`** — after any substantial change: reuse/simplification pass.
    Quality only; it does not hunt bugs.
 4. **`/code-review`** — before every PR, on the staged diff. Scope it first: name
@@ -162,6 +178,16 @@ what they do:
    CI behavior with guess-commits on `main`; move to a branch with
    `workflow_dispatch` after two failed attempts and squash the result.
 
+7. **Merge and release are two different gates.** Merged ≠ in prod (step 3b).
+   Prod releases run in fixed slots, not on merge, and `project` and
+   `teknisk-vand` need an explicit human approval for prod. The approval moves
+   from the laptop to a scheduled `udgiv-app.yml` workflow, approved with the
+   `prod-ja` label from Jakob or Mads (S-1633, AI-tools #93 — check whether it is
+   merged before relying on it). Prod **data** (seed/SQL that changes real rows)
+   always needs the owner's explicit yes, per file. `devhub` is the exception:
+   merge there deploys straight to prod.
+
 Skipping a stage is the user's call to make, not a default. The recon report's
 proposal (step 5) should already name which of these skills each suggested step
-will use.
+will use — and, for anything user-facing, that it will be browser-tested and
+whether help changes.
