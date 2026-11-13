@@ -78,6 +78,10 @@ Læs `CLAUDE.md` i repoet først. Den bærer husets regler, og de gælder.
 ## Krav
 - Måletabel i prøvens hoved, brudt mindst tre gange — kør hvert brud, skøn dem ikke.
 - Alt grønt før du pusher: typecheck, prøver, build.
+- Ændrer punktet noget, brugeren ser: test det i en RIGTIG browser (Playwright mod `npm run dev`).
+  Gør det, brugeren gør: klik, gem og genindlæs. Tag skærmbilleder ved 1440×900 og 1280×800 med menuen
+  åben, før og efter, og gem dem i `~/<punkt>-skærmbilleder/`. PR-teksten bærer
+  `Set i browser: …`. Uden linjen merger løkken ikke (Jakob 06-11-2026).
 - Arbejd på grenen `<gren>` (den er allerede tjekket ud). Push den.
 - ⚠️ `gh` har INGEN auth på denne maskine. Åbn IKKE PR'en — skriv PR-teksten til
   `pr-body-<punkt>.md` i repoets rod og sig i rapporten, at grenen er pushet.
@@ -100,13 +104,15 @@ docker exec ferm-projects-db psql -U projects -d projects_db -qc "CREATE DATABAS
 export $(grep "^export NPM_TOKEN" ~/.bashrc | sed "s/^export //" | head -1)
 npm ci >/dev/null 2>&1
 set -a; . ./.env; set +a
-npx prisma db push --skip-generate >/dev/null 2>&1 && npx prisma generate >/dev/null 2>&1
+npx prisma db push >/dev/null 2>&1 && npx prisma generate >/dev/null 2>&1
 nohup claude -p "$(cat ~/opgave-<punkt>.md)" --model sonnet --dangerously-skip-permissions > ~/<punkt>.log 2>&1 &
 echo "startet — pid $! i ~/wt/<punkt> mod projects_<punkt>"'
 ```
 
 `--dangerously-skip-permissions` er det, laptoppens agenter også kører med — forskellen
-er maskinen, ikke tilliden. Hesten har egen GitHub-nøgle og kan pushe.
+er maskinen, ikke tilliden. Hesten pusher som GitHub App'en `ferm-hest` (S-1536, 3-11-2026):
+git henter et timestoken via `sudo -n hest-token`. Agenter må stadig ikke åbne PR'er — det er
+laptoppens tjekpunkt — selvom `gh-hest` nu findes til drift.
 
 **`--model sonnet` er standarden, og flaget skal ALTID med.** Et velbeskrevet punkt er
 Sonnet-arbejde: briefen bærer hele DevHub-teksten, husets regler og målekravene, så agenten
