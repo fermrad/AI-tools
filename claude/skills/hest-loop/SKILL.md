@@ -90,7 +90,8 @@ Prøv den: https://2231.dev.project.ferm.dk
 CI grøn · hjælp rettet
 → merge / ret: …
 ```
-- **merge** → PR'en markeres klar, et menneske merger → `main` → staging.
+- **merge** → **merges med det samme**, ingen ekstra runde: PR'en markeres klar og merges til
+  `main` på godkenderens eget login (laptop-sessionen), aldrig som `ferm-hest` → staging.
 - **ret: …** → tilbage til 5 med rettelsen.
 
 ## 7 · Udgivelse
