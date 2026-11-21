@@ -1,107 +1,100 @@
 ---
 name: hest-loop
-description: Kør husets arbejdsløkke fra feedback til prod med to godkendelser — idéen før der bygges, resultatet før der merges. Brug når Claude skal arbejde løbende på DevHub-feedback (timevagten), eller når nogen beder om «kør løkken» / «næste runde».
+description: Kør husets arbejdsløkke fra feedback til prod. Claude analyserer hvert punkt med fire spørgsmål og bygger; et menneske merger altid og spørges kun før bygningen, når punktet er risikabelt, stort, usikkert eller ønsket udefra. Brug når Claude skal arbejde løbende på DevHub-feedback (timevagten), eller når nogen beder om «kør løkken» / «næste runde».
 ---
 
+# hest-loop — fra feedback til prod
 
-# hest-loop — fra feedback til prod med to stop
+Timevagtens løkke (feedback → sprint → hesten → PR → merge → udgivelse) med **én fast menneskelig
+godkendelse: merge**. Claude tænker selv over hvert punkt (de fire spørgsmål i trin 2) og spørger
+kun før bygningen, når det er nødvendigt (trin 3). Aftalt af Franco og Jakob 19-11-2026,
+forenklet 21-11-2026: så få menneskelige stop som muligt, men intet når `main` uden et menneske.
 
-Løkken er timevagtens arbejde (feedback → sprint → hesten → PR → merge → udgivelse), men den
-**stopper to gange** og spørger et menneske. Aftalt af Franco og Jakob 19-11-2026: Claude må
-gerne foreslå og bygge, men vi beslutter, hvad der bygges, og hvad der kommer på `main`.
+**Det er én løkke.** Timevagten følger denne skill. Start ikke en løkke ved siden af den — to
+løkker bygger den samme feedback.
 
-**De to faste regler**
-- **Intet bygges uden et «byg».** Intet merges uden et «merge». Intet svar = punktet står stille.
-- **Botten merger aldrig.** `ferm-hest` pusher grene, et menneske merger. Kun godkendte
-  ændringer når `main`.
+**Faste regler**
+- **Et menneske merger altid.** Botten (`ferm-hest`) pusher grene og åbner PR'er, men merger
+  aldrig. Merge-løkken (`hestevagt-merge.sh`) merger ikke løkkens PR'er.
+- **Intet bygges, der ikke består de fire spørgsmål.**
+- **Intet forsvinder i stilhed.** Et punkt uden svar venter på den ugentlige gennemgang.
 
 ## 0 · Før hver runde
-- Læs husets skills (repo-recon, hest-agent, new-pr) — de gælder i hvert trin herunder.
-- Mål hesten som i `hest-agent` «Før du starter — mål maskinen». Er der ikke plads, bygges der
-  ikke i denne runde; trin 1–4 må godt køre.
+- Husets skills gælder i hvert trin (`repo-recon`, `hest-agent`, `new-pr`, `code-review`).
+- Mål hesten som i `hest-agent`. Ingen plads → trin 1–3 kører, intet bygges.
+- Højst **3 PR'er venter pr. godkender**. Er loftet nået, bygges intet nyt til den person.
 
 ## 1 · Saml
-Ny feedback fra alle apps (`list_feedback`, fase *ny*). «Ny» betyder kun, at ingen har koblet
-den endnu — søg F-nummeret i sprint-punkterne, før noget oprettes.
+Ny feedback fra alle apps (`list_feedback`, fase *ny*) og sager, hvor afsenderen har svaret
+(`afsenderHarSvaret: true`). «Ny» betyder kun, at ingen har koblet den — søg F-nummeret i
+sprint-punkterne, før noget oprettes.
 
-## 2 · Analysér
-For hver feedback: bug, ønske eller spørgsmål? Findes punktet allerede? Hvilken arbejdspakke
-(R) og hvilket spor (T) hører den til? Hvem er R på pakken — det er den, der spørges.
+## 2 · Analysér — de fire spørgsmål
+Claude svarer selv og skriver svarene på punktet:
+1. **Findes det allerede?** I appen (søg i koden og hjælperegistrene) og i DevHub (punkter,
+   pakker, åbne PR'er).
+2. **Er det nødvendigt?** Hvem bad om det, hvor ofte, er det et ægte problem?
+3. **Hvilket problem løser det?** Citér feedbacken med F-numre.
+4. **Er det en god løsning?** Plus ét alternativ.
 
-## 3 · Filtrér — vi skal ikke afvise ligegyldige punkter hele tiden
-- Dublet → kobl til det eksisterende punkt.
-- Spørgsmål → besvar (hjælpetekst eller svar til afsender), intet punkt.
-- Støj eller allerede løst → parkér med en grund.
-Alt det står nederst i oversigten, uden at nogen skal svare.
+| Udfald | Handling |
+|---|---|
+| **byg** | skriv S-punktet (F → S → R → T), videre til 3 |
+| **findes allerede** | svar afsenderen, hvor det findes; luk feedbacken |
+| **dublet** | kobl til det eksisterende punkt |
+| **ikke nødvendigt** | parkér, grunden skrives på punktet |
+| **spørgsmål** | besvar (svar til afsender eller hjælpetekst) |
+| **stor idé** (nyt modul, roadmap-niveau) | foreslå en R-pakke; løkken bygger den ikke |
 
-## 4 · Skriv punktet
-Opret S-punktet som `idea`, koblet F → S → R → T (DevHub kræver kæden).
-> ⚠️ ÅBENT: oprettes punktet som `idea` før stop 1, eller først efter «byg»?
+## 3 · Spørg først — kun når det er nødvendigt
+Byg straks, medmindre mindst én af disse gælder:
+- punktet rører **databasen** (skema, migration, SQL), **adgang/login**, **`/api`-ruter** eller
+  **deploy** (workflows, Dockerfile, env);
+- det er **større end S** (ca. 150 linjer);
+- Claude er **usikker på spørgsmål 2 eller 4**;
+- det er et **ønske fra en anden** end Jakob, Mads eller Franco.
 
-## ⏸ Stop 1 — idéen (Teams)
-Én samlet oversigt, højst 2× om dagen (fx 9:00 og 14:00), til hver R. Kort nok til en telefon:
+Så sættes et kort på hestetavlen i `venter_paa_dig` til godkenderen: de fire svar, **hvorfor**
+der spørges, og `byg / ret / parkér / drop`. Et punkt, der bygges uden spørgsmål, får én linje i
+timevagtens oversigt: «bygget uden spørgsmål, fordi …», så en forkert vurdering kan ses.
 
-```
-🐴 3 nye idéer · svar med nummer
+**Godkender** = punktets R, ellers pakkens A, ellers Jakob. DevHub-punkter → Jakob (merge = prod).
+Intet svar inden ugens tjek-ind → punktet kommer på listen til den ugentlige gennemgang
+(15 min, «beslut eller parkér»). Det parkeres aldrig i stilhed.
 
-1) S-1720 «Kort: ét kort over listen overalt» (project)
-   Problem: 2 brugere farer vild på Arwos-kortet (F-812, F-815)
-   Idé: samme kort+liste som fælleskortet
-   Alternativ: fjern kun det tredje kort
-   Størrelse: lille
-   → byg / ret / parkér / drop
+## 4 · Byg
+Husets faste flow fra `repo-recon`, på hesten efter `hest-agent`, `--model sonnet` (opus kun
+ved adgangsmodel eller skema med datatab):
+recon → byg + `/run` → test i browser med skærmbilleder før/efter ved 1440×900 og 1280×800
+(`Set i browser:`) → hjælpen følger fladen (`Hjælp:`) → `/simplify` → `/code-review`
+(+ `sikkerhedsgennemgang` ved adgang, sessioner, uploads og API).
+- Små punkter må samles på husets *samling*-gren. Punkter fra listen i trin 3 får egen gren.
+- `ferm-hest` åbner kladde-PR'en (`gh-hest pr create`) med skærmbillederne i PR-teksten.
+- **Tjek igen på den færdige diff.** Rører PR'en noget fra listen i trin 3, som ikke var
+  forventet, skrives det øverst i PR-teksten, og kun Jakob eller Mads må merge.
+- **Går den i stå** (agent over 2 timer, CI rød to gange): stop, kort i `venter_paa_dig`:
+  «⚠️ S-… stoppet: <grund>. Kræver dig.» Ingen automatiske genforsøg.
+> ⚠️ ÅBENT (Jakob): `hest-agent` siger i dag, at agenter aldrig åbner PR'er. Løkken kræver, at
+> `ferm-hest` må oprette dem — ikke merge.
 
-Klaret af mig, intet svar nødvendigt:
-· F-820 = dublet af S-1650, koblet
-```
-Svar: `1 byg, 2 drop allerede løst, 3 ret: kun på projektkortet`.
-- **byg** → `planned`, videre til 5. **ret** → skriv om, med i næste oversigt.
-  **parkér** / **drop** → sæt status, skriv grunden på punktet.
-- Intet svar → én påmindelse i næste oversigt, derefter står punktet parkeret.
-> ⚠️ ÅBENT: Teams fra en hovedløs session på hesten kræver eget Microsoft-login (samme
-> problem som DevHub-login i R-170). Indtil da sendes fra laptoppen.
+## ⏸ 5 · Merge — den faste godkendelse
+Kortet flytter til `klar_til_merge`. Godkenderen læser PR'en (resumé, før/efter, CI, hjælp) og
+- **merger selv** på GitHub — det kan gøres fra telefonen — eller
+- skriver **ret: …** → tilbage til trin 4.
 
-## 5 · Byg
-Husets faste flow fra `repo-recon`: recon → byg + `/run` → test i browser (`Set i browser:`) →
-`/simplify` → `/code-review` → `/new-pr` (kladde-PR). Kør på hesten efter `hest-agent`,
-`--model sonnet` som standard.
-- **Egen gren, intet på `main`.**
-- PR'en åbnes fra laptoppen, som `hest-agent` trin 4 siger.
-> ⚠️ ÅBENT: små punkter samles i dag på én *samling*-gren (husregel 06-11). Så viser én
-> preview flere ændringer. Godkendes de samlet, eller får hvert punkt sin egen gren?
+En samling-PR godkendes samlet; kortet lister punkterne på den.
+> ⚠️ ÅBENT (Jakob): `main` kræver i dag 0 godkendelser (code owners kun på skema, workflows og
+> SQL). Skal «botten merger aldrig» håndhæves af GitHub (1 krævet godkendelse) eller af reglen
+> alene?
 
-## 6 · Preview
-Sæt etiketten `dev-deploy` på PR'en → `deploy-pr-stack.yml` rejser
-`https://<PR>.dev.project.ferm.dk`. Den forsvinder igen, når PR'en lukkes.
-- Previewen har sin egen database med **opdigtede data** (seed) — af sikkerhedsgrunde: appen
-  kører `db push` med grenens ikke-godkendte skema, før den starter, og dev-boksen er ikke
-  stedet for rigtige kundedata. Ting, der kræver rigtige data, ses først på staging.
-- Kun `project` har previews i dag.
-> ⚠️ ÅBENT: hvordan logger man ind på en preview? Og stakken er sidst brugt 04-08-2026
-> (#264) — prøv den, før løkken hviler på den.
+## 6 · Udgivelse
+Som i dag: prod i slottene via `udgiv.yml`, op til nyeste PR med `prod-ja` fra Jakob eller
+Mads. DevHub har ingen slots: merge = prod.
 
-## ⏸ Stop 2 — resultatet (Teams)
-Ét kort pr. punkt, når det er klar:
-```
-🐴 Klar til at se · S-1720 «Kort: ét kort over listen»
-Ændret: Arwos-siden bruger nu fælleskortet + listen
-[før] [efter]
-Prøv den: https://2231.dev.project.ferm.dk
-CI grøn · hjælp rettet
-→ merge / ret: …
-```
-- **merge** → **merges med det samme**, ingen ekstra runde: PR'en markeres klar og merges til
-  `main` på godkenderens eget login (laptop-sessionen), aldrig som `ferm-hest` → staging.
-- **ret: …** → tilbage til 5 med rettelsen.
+## 7 · Luk og forfra
+Når health svarer den nye sha: S-punktet → `shipped`, afsenderen får et svar i klart sprog, og
+feedbacken lukkes. Kortet → `i_prod`. Derefter forfra fra trin 1.
 
-## 7 · Udgivelse
-Prod kun i slottene via `udgiv.yml` og kun op til nyeste PR med `prod-ja` fra Jakob eller Mads.
-Når health svarer den nye sha: S-punktet → `shipped`, koblet feedback lukker selv.
-> ⚠️ ÅBENT: er stop 2 nok, eller bliver `prod-ja` et tredje stop?
-
-## 8 · Besked og forfra
-```
-✅ I prod 12:00 · S-1720 · F-812, F-815 lukket
-```
-Går noget i stå (CI rød to gange, bygget dør), sendes kun: `⚠️ S-1720 stoppet: CI rød to gange.
-Kræver dig.` Derefter forfra fra 1.
+## Senere — ikke nu
+Teams-beskeder · preview-sider (`dev-deploy`, ingen vellykket kørsel siden august — skærmbilleder
+i stedet) · timevagten på hesten (R-170) · et «hvem»-felt på hestetavlens kort.
