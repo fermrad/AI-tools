@@ -43,14 +43,14 @@ Claude svarer selv og skriver svarene på punktet:
 | **findes allerede** | svar afsenderen, hvor det findes; luk feedbacken |
 | **dublet** | kobl til det eksisterende punkt |
 | **ikke nødvendigt** | parkér, grunden skrives på punktet |
-| **spørgsmål** | besvar (svar til afsender eller hjælpetekst) |
+| **spørgsmål** | besvar (svar til afsender eller hjælpetekst). Afslører spørgsmålet en manglende funktion, behandles det som et ønske |
 | **stor idé** (nyt modul, roadmap-niveau) | foreslå en R-pakke; løkken bygger den ikke |
 
 ## 3 · Spørg først — kun når det er nødvendigt
 Byg straks, medmindre mindst én af disse gælder:
 - punktet rører **databasen** (skema, migration, SQL), **adgang/login**, **`/api`-ruter** eller
   **deploy** (workflows, Dockerfile, env);
-- det er **større end S** (ca. 150 linjer);
+- det er **stort: L eller større** efter DevHub-estimatet. Tæl ikke linjer — prøverne er omkring halvdelen af hver PR;
 - Claude er **usikker på spørgsmål 2 eller 4**;
 - det er et **ønske fra en anden** end Jakob, Mads eller Franco.
 
